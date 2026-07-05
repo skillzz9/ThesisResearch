@@ -74,7 +74,7 @@ class LoopPairDataset(Dataset):
 def train():
     # 1. Setup Data
     print(">>> 1. Initializing Dataset and DataLoader...")
-    dataset = LoopPairDataset("dataset_pairs.csv")
+    dataset = LoopPairDataset("train_pairs.csv")
     
     # We use num_workers=0 to safely handle the temporary file writing in the dataset
     batch_size = 16
@@ -162,7 +162,12 @@ def train():
         
     # 6. Save Model State
     total_duration = (time.time() - total_start_time) / 60
-    save_path = "siamese_weights.pth"
+    
+    # Save to the models folder with a timestamp so we never overwrite
+    os.makedirs("models", exist_ok=True)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    save_path = f"models/siamese_weights_{timestamp}.pth"
+    
     torch.save(model.state_dict(), save_path)
     
     print("=======================================================")

@@ -17,7 +17,19 @@ def evaluate_and_find_best_threshold():
     
     model = SiameseNetwork().to(device)
     
-    weights_path = "siamese_weights.pth"
+    import os
+    import glob
+    
+    # Find the most recently saved model in the models/ folder
+    model_files = glob.glob("models/*.pth")
+    if not model_files:
+        print("CRITICAL ERROR: No models found in the models/ directory!")
+        return
+        
+    # Sort files by modification time and get the latest
+    weights_path = max(model_files, key=os.path.getctime)
+    print(f"     -> Auto-selected newest model: {weights_path}")
+    
     try:
         model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
         print(f"     -> Successfully loaded weights from {weights_path}")
@@ -27,8 +39,13 @@ def evaluate_and_find_best_threshold():
 
     model.eval()
 
-    print("\n>>> 2. Loading Dataset...")
-    dataset = LoopPairDataset("dataset_pairs.csv")
+    import sys
+    
+    # Accept CSV file from command line, default to test_pairs.csv
+    target_csv = sys.argv[1] if len(sys.argv) > 1 else "test_pairs.csv"
+    
+    print(f"\n>>> 2. Loading Dataset ({target_csv})...")
+    dataset = LoopPairDataset(target_csv)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=0)
     
     all_distances = []
