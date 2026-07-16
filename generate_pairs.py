@@ -1,147 +1,153 @@
 import os
 import random
 import glob
+import yaml
 import pandas as pd
 from itertools import combinations
 
-def parse_filename(filepath):
+def parse_filename(filepath, base_dir):
     """
     Parses a filename like 'track_00001_stem1_place01_shift0.pt'
-    Returns a dictionary with the track, stem, and place.
+    Returns a dictionary with the track, stem, place, and its mapped instrument category.
     """
     basename = os.path.basename(filepath).replace("_shift0.pt", "")
     parts = basename.split("_")
     if len(parts) >= 4:
+        # Construct exact track folder name, e.g. "Track00001"
+        track_folder_name = f"Track{parts[1]}"
+        track_folder = os.path.join(base_dir, track_folder_name)
+        
+        stem_raw = parts[2] # e.g. 'stem1'
+        
+        # Convert 'stem1' to 'S01' for YAML lookup
+        stem_num = stem_raw.replace("stem", "")
+        stem_key = f"S{int(stem_num):02d}"
+        
+        category = "Unknown"
+        yaml_path = os.path.join(track_folder, "metadata.yaml")
+        if os.path.exists(yaml_path):
+            with open(yaml_path, 'r') as f:
+                data = yaml.safe_load(f)
+                try:
+                    inst_class = data['stems'][stem_key]['inst_class']
+                    if inst_class == "Drums":
+                        category = "Drums"
+                    elif inst_class == "Bass":
+                        category = "Bass"
+                    else:
+                        # Pianos, Organs, Guitars, Strings all become "Melody/Synth"
+                        category = "Melody" 
+                except:
+                    pass
+        
         return {
             "filepath": filepath,
-            "filename": basename,
-            "track": f"{parts[0]}_{parts[1]}",  # e.g., 'track_00001'
-            "stem": parts[2],                   # e.g., 'stem1'
-            "place": parts[3]                   # e.g., 'place01'
+            "track": track_folder_name,
+            "stem": stem_raw,
+            "place": parts[3],
+            "category": category
         }
     return None
 
+def is_useful_combination(cat_a, cat_b):
+    """
+    Only allow the specific pairings you requested.
+    """
+    pair = set([cat_a, cat_b])
+    
+    allowed = [
+        set(["Drums", "Bass"]),      # Drums with Bass
+        set(["Melody", "Bass"]),     # Synth with Bass
+        set(["Melody", "Melody"]),   # Synth with Vocals/Other Melodies
+        set(["Melody", "Drums"])     # Bonus: Melody with Drums
+    ]
+    return pair in allowed
+
 def generate_pair_dataset(vectors_dir, output_csv="dataset_pairs.csv"):
-    # Find all base (_shift0) .pt files in vectors_dir
     all_files = glob.glob(os.path.join(vectors_dir, "**/*_shift0.pt"), recursive=True)
     
-    parsed_data = [parse_filename(f) for f in all_files if parse_filename(f) is not None]
+    parsed_data = [parse_filename(f, vectors_dir) for f in all_files]
+    parsed_data = [x for x in parsed_data if x is not None]
+    
     df = pd.DataFrame(parsed_data)
     
     if df.empty:
-        print(f"No valid loop files found in {loops_dir}!")
+        print("No valid loop files found!")
         return
 
     positives = []
     negatives = []
     
-    print(f"Found {len(df)} loop files. Generating pairs...")
+    print(f"Found {len(df)} loop files. Generating targeted, useful pairs...")
 
-    # Group by track and place for Positives & Pitch-Clashes
+    # Group by track and place
     grouped = df.groupby(["track", "place"])
     for (track, place), group in grouped:
-        stems = group["filepath"].tolist()
-        if len(stems) >= 2:
-            # Get every combination of different stems playing at the exact same time
-            all_combos = list(combinations(stems, 2))
+        # Get all valid stems in this exact measure
+        stems_info = group.to_dict('records')
+        
+        if len(stems_info) >= 2:
+            all_combos = list(combinations(stems_info, 2))
             
-            # Hard Capping: Max 5 random combinations per song-block to prevent O(N^2) explosion
-            if len(all_combos) > 5:
-                all_combos = random.sample(all_combos, 5)
+            valid_combos = []
+            for a, b in all_combos:
+                if is_useful_combination(a["category"], b["category"]):
+                    valid_combos.append((a["filepath"], b["filepath"]))
+            
+            # Max 1 random combination per song-block to maximize diversity
+            if len(valid_combos) > 1:
+                valid_combos = random.sample(valid_combos, 1)
                 
-            for file_a, file_b in all_combos:
+            for file_a, file_b in valid_combos:
+                # 1. Standard Positive
+                positives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": 0, "label": 1})
                 
-                # 1. Standard Positive (Label 1, No Pitch Shift)
-                positives.append({
-                    "file_A": file_a, "shift_A": 0,
-                    "file_B": file_b, "shift_B": 0,
-                    "label": 1
-                })
-                
-                # 2. Augmented Positive (Label 1, Synchronized Pitch Shift)
-                # Shift both equally so they still harmonically match
+                # 2. Augmented Positive
                 sync_shift = random.choice([-3, -2, -1, 1, 2, 3])
-                positives.append({
-                    "file_A": file_a, "shift_A": sync_shift,
-                    "file_B": file_b, "shift_B": sync_shift,
-                    "label": 1
-                })
+                positives.append({"file_A": file_a, "shift_A": sync_shift, "file_B": file_b, "shift_B": sync_shift, "label": 1})
                 
-                # 3. Hard Negative: Pitch-Clash (Label 0, Asymmetrical Pitch Shift)
-                # Shift only one stem to create severe dissonance while tempo/groove match perfectly
+                # 3. Hard Negative: Pitch-Clash
                 clash_shift = random.choice([-2, -1, 1, 2])
-                negatives.append({
-                    "file_A": file_a, "shift_A": 0,
-                    "file_B": file_b, "shift_B": clash_shift,
-                    "label": 0
-                })
+                negatives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": clash_shift, "label": 0})
 
-    # 4. Hard Negative: Structure-Clash (Label 0, Same Track, Different Place)
-    track_grouped = df.groupby("track")
-    for track, group in track_grouped:
-        places = group["place"].unique()
-        if len(places) >= 2:
-            # Generate a solid amount of structural clashes
-            for _ in range(len(group) * 2): 
-                p1, p2 = random.sample(list(places), 2)
-                file_a = random.choice(group[group["place"] == p1]["filepath"].tolist())
-                file_b = random.choice(group[group["place"] == p2]["filepath"].tolist())
-                
-                # Avoid accidentally pairing the exact same stem from different places if you only want 
-                # cross-stem structural clashes, but even the same stem from different places is a clash!
-                negatives.append({
-                    "file_A": file_a, "shift_A": 0,
-                    "file_B": file_b, "shift_B": 0,
-                    "label": 0
-                })
-
-    # 5. Easy Negatives (Label 0, Random Tracks)
+    # Cross-Track Easy Negatives (Targeted)
     tracks = df["track"].unique()
     if len(tracks) >= 2:
-        # Generate enough to bulk up the negatives
-        for _ in range(len(positives)): 
+        for _ in range(len(positives) * 2): 
             t1, t2 = random.sample(list(tracks), 2)
-            file_a = random.choice(df[df["track"] == t1]["filepath"].tolist())
-            file_b = random.choice(df[df["track"] == t2]["filepath"].tolist())
-            negatives.append({
-                "file_A": file_a, "shift_A": 0,
-                "file_B": file_b, "shift_B": 0,
-                "label": 0
-            })
-    else:
-        print("Notice: Only 1 track found. Skipping 'Easy Negatives' (cross-track pairs).")
+            
+            # Grab random stems from each track
+            row_a = df[df["track"] == t1].sample(1).iloc[0]
+            row_b = df[df["track"] == t2].sample(1).iloc[0]
+            
+            # Only append if they are a useful combination
+            if is_useful_combination(row_a["category"], row_b["category"]):
+                negatives.append({
+                    "file_A": row_a["filepath"], "shift_A": 0,
+                    "file_B": row_b["filepath"], "shift_B": 0,
+                    "label": 0
+                })
 
-    # --- Balance the Dataset (Strict 50/50 Split) ---
+    # Balance 50/50
     random.shuffle(positives)
     random.shuffle(negatives)
     
-    # Cut down the larger list to match the smaller list exactly
     min_count = min(len(positives), len(negatives))
-    
-    balanced_positives = positives[:min_count]
-    balanced_negatives = negatives[:min_count]
-    
-    final_dataset = balanced_positives + balanced_negatives
-    
-    # Final shuffle so 1s and 0s are completely mixed
+    final_dataset = positives[:min_count] + negatives[:min_count]
     random.shuffle(final_dataset)
     
-    # We need to map the selected shift back into the filepath since we are using pre-extracted shifted .pt files
+    # Map shifts to filenames
     for entry in final_dataset:
         entry["file_A"] = entry["file_A"].replace("_shift0.pt", f"_shift{entry['shift_A']}.pt")
         entry["file_B"] = entry["file_B"].replace("_shift0.pt", f"_shift{entry['shift_B']}.pt")
         
-    # Export
-    df_final = pd.DataFrame(final_dataset)
-    df_final.to_csv(output_csv, index=False)
+    pd.DataFrame(final_dataset).to_csv(output_csv, index=False)
     
-    print(f"\n--- Dataset Generation Complete ---")
-    print(f"Total Pairs: {len(df_final)}")
-    print(f"Positives (Label 1): {min_count}")
-    print(f"Negatives (Label 0): {min_count}")
-    print(f"Saved directly to: {output_csv}")
+    print(f"\n--- Targeted Dataset Generation Complete ---")
+    print(f"Total Pairs: {len(final_dataset)}")
+    print(f"Positives: {min_count} | Negatives: {min_count}")
+    print(f"Saved to: {output_csv}")
 
 if __name__ == "__main__":
-    # Pointing it to the root babyslakh_16k folder will let it recursively find all track loop_vectors
     target_directory = "/Users/hugoposthuma/Downloads/Thesis/babyslakh_16k"
     generate_pair_dataset(target_directory, "dataset_pairs.csv")

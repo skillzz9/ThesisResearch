@@ -3,6 +3,7 @@ import time
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import Adam
 
@@ -83,6 +84,11 @@ def train():
     print(f"     -> Dataset loaded successfully with {len(dataset)} total pairs.")
     print(f"     -> Total Batches per Epoch: {len(dataloader)} (Batch Size: {batch_size})")
     
+    print(">>> 1.5 Initializing Validation DataLoader...")
+    val_dataset = LoopPairDataset("test_pairs.csv")
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    print(f"     -> Validation Dataset loaded with {len(val_dataset)} pairs.")
+    
     # 2. Setup Device
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f">>> 2. Neural Network dispatched to device: [{device.type.upper()}]")
@@ -95,18 +101,18 @@ def train():
     # 4. Setup Optimizer
     # IMPORTANT: We filter out frozen parameters (layer1/2) so Adam doesn't waste compute tracking them
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
-    # Lowered learning rate to 0.0001 to prevent Exploding Gradients
-    optimizer = Adam(trainable_params, lr=0.0001)
+    # Lowered learning rate to 0.0001 and added weight decay to fight Overfitting
+    optimizer = Adam(trainable_params, lr=0.0001, weight_decay=1e-4)
     
     # 5. Training Loop
-    # We increased this to 25 epochs so the network has enough time to fully map out 
-    # the complex rules of music theory (especially the Hard Negatives).
-    num_epochs = 25
+    # Reduced to 15 epochs to prevent the model from memorizing the training data (Early Stopping)
+    num_epochs = 15
     print("\n=======================================================")
     print(f"--- Starting Siamese Network Training ({num_epochs} Epochs) ---")
     print("=======================================================\n")
     
     total_start_time = time.time()
+    history = {'train_loss': [], 'val_loss': []}
     
     for epoch in range(num_epochs):
         model.train()
@@ -154,9 +160,28 @@ def train():
                 
         # End of Epoch logging
         avg_loss = epoch_loss / len(dataloader)
+        
+        # --- Validation Pass ---
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for image_A, math_A, image_B, math_B, label in val_dataloader:
+                image_A, math_A = image_A.to(device), math_A.to(device)
+                image_B, math_B = image_B.to(device), math_B.to(device)
+                label = label.to(device)
+                
+                embed_A, embed_B = model(image_A, math_A, image_B, math_B)
+                loss = criterion(embed_A, embed_B, label)
+                val_loss += loss.item()
+                
+        avg_val_loss = val_loss / len(val_dataloader)
+        
+        history['train_loss'].append(avg_loss)
+        history['val_loss'].append(avg_val_loss)
+        
         epoch_duration = time.time() - epoch_start_time
         print(f"\n=== EPOCH {epoch+1} FINISHED ===")
-        print(f"    -> Final Average Loss: {avg_loss:.4f}")
+        print(f"    -> Final Train Loss: {avg_loss:.4f} | Final Val Loss: {avg_val_loss:.4f}")
         print(f"    -> Epoch Duration: {epoch_duration:.1f} seconds\n")
         print("-" * 55 + "\n")
         
@@ -170,9 +195,23 @@ def train():
     
     torch.save(model.state_dict(), save_path)
     
+    # 7. Generate Overfitting Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, num_epochs+1), history['train_loss'], label='Training Loss (Tracks 1-16)', color='blue', marker='o')
+    plt.plot(range(1, num_epochs+1), history['val_loss'], label='Validation Loss (Tracks 17-20)', color='red', marker='x')
+    plt.title('Training vs Validation Loss (The Concrete Ceiling)')
+    plt.xlabel('Epochs')
+    plt.ylabel('Contrastive Loss')
+    plt.legend()
+    plt.grid(True)
+    
+    plot_path = f"models/loss_curve_{timestamp}.png"
+    plt.savefig(plot_path)
+    
     print("=======================================================")
     print(f"TRAINING COMPLETE IN {total_duration:.2f} MINUTES!")
     print(f"Model weights successfully saved to: {save_path}")
+    print(f"Loss curve successfully saved to: {plot_path}")
     print("=======================================================")
 
 if __name__ == "__main__":

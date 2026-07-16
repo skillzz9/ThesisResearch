@@ -37,11 +37,11 @@ class MusicTower(nn.Module):
             nn.Linear(90, 256),
             nn.BatchNorm1d(256),
             nn.LeakyReLU(negative_slope=0.01),
-            nn.Dropout(p=0.3),
+            nn.Dropout(p=0.6),
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.LeakyReLU(negative_slope=0.01),
-            nn.Dropout(p=0.3)
+            nn.Dropout(p=0.6)
         )
         
         # --- Fusion and Output Space ---
@@ -50,7 +50,7 @@ class MusicTower(nn.Module):
             nn.Linear(640, 512),
             nn.BatchNorm1d(512),
             nn.LeakyReLU(negative_slope=0.01),
-            nn.Dropout(p=0.3),
+            nn.Dropout(p=0.6),
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.LeakyReLU(negative_slope=0.01),
