@@ -51,8 +51,8 @@ def extract_loop_features(track_dir):
                 math_vector_np = right_eye.get_vector(temp_path)
                 math_vector = torch.tensor(math_vector_np, dtype=torch.float32)
                 
-                # Apply normalization to match training expectations
-                math_vector = (math_vector - math_vector.mean()) / (math_vector.std() + 1e-8)
+                # FIX: Removed the bad cross-feature z-score normalization. 
+                # Raw features will now be saved to disk, and column-wise scaling will happen during training.
             finally:
                 os.remove(temp_path)
             

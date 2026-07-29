@@ -37,6 +37,7 @@ class MusicTower(nn.Module):
         # --- Mathematical Branch (Right Eye) ---
         # MLP for 90-dim math_vector
         self.math_mlp = nn.Sequential(
+            nn.BatchNorm1d(90), # FIX: Dynamically scales the raw [BPM, flux, etc.] on the GPU!
             nn.Linear(90, 256),
             nn.BatchNorm1d(256),
             nn.LeakyReLU(negative_slope=0.01),
