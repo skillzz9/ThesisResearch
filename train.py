@@ -71,11 +71,48 @@ class LoopPairDataset(Dataset):
         
         return image_A, math_A, image_B, math_B, label
 
+class LoopTripletDataset(Dataset):
+    def __init__(self, csv_file):
+        self.df = pd.read_csv(csv_file)
+        self.positives = self.df[self.df['label'] == 1].reset_index(drop=True)
+        self.negatives = self.df[self.df['label'] == 0].reset_index(drop=True)
+        
+    def __len__(self):
+        return len(self.positives)
+        
+    def _load_tensor_dict(self, filepath):
+        tensor_dict = torch.load(filepath, weights_only=True)
+        image = tensor_dict['image_tensor']
+        target_length = 350
+        current_length = image.shape[2]
+        
+        if current_length < target_length:
+            import torch.nn.functional as F
+            image = F.pad(image, (0, target_length - current_length), "constant", 0)
+        elif current_length > target_length:
+            image = image[:, :, :target_length]
+        math_vector = tensor_dict['math_vector']
+        
+        image = torch.nan_to_num(image, nan=0.0)
+        math_vector = torch.nan_to_num(math_vector, nan=0.0)
+            
+        return image, math_vector
+
+    def __getitem__(self, idx):
+        pos_row = self.positives.iloc[idx]
+        image_anc, math_anc = self._load_tensor_dict(pos_row['file_A'])
+        image_pos, math_pos = self._load_tensor_dict(pos_row['file_B'])
+        
+        neg_row = self.negatives.sample(1).iloc[0]
+        image_neg, math_neg = self._load_tensor_dict(neg_row['file_B'])
+        
+        return image_anc, math_anc, image_pos, math_pos, image_neg, math_neg
+
 
 def train():
     # 1. Setup Data
-    print(">>> 1. Initializing Dataset and DataLoader...")
-    dataset = LoopPairDataset("train_pairs.csv")
+    print(">>> 1. Initializing Triplet Dataset and DataLoader...")
+    dataset = LoopTripletDataset("train_pairs.csv")
     
     # We use num_workers=0 to safely handle the temporary file writing in the dataset
     batch_size = 16
@@ -94,9 +131,10 @@ def train():
     print(f">>> 2. Neural Network dispatched to device: [{device.type.upper()}]")
     
     # 3. Initialize Model and Loss
-    print(">>> 3. Initializing True Siamese Network and Contrastive Loss...")
+    print(">>> 3. Initializing True Siamese Network and Triplet Margin Loss...")
     model = SiameseNetwork().to(device)
-    criterion = ContrastiveLoss(margin=2.0).to(device)
+    criterion = torch.nn.TripletMarginLoss(margin=2.0, p=2).to(device)
+    val_criterion = ContrastiveLoss(margin=2.0).to(device)
     
     # 4. Setup Optimizer
     # IMPORTANT: We filter out frozen parameters (layer1/2) so Adam doesn't waste compute tracking them
@@ -121,22 +159,23 @@ def train():
         
         print(f"+++ EPOCH {epoch+1}/{num_epochs} STARTED +++")
         
-        for batch_idx, (image_A, math_A, image_B, math_B, label) in enumerate(dataloader):
+        for batch_idx, (image_anc, math_anc, image_pos, math_pos, image_neg, math_neg) in enumerate(dataloader):
             # Send everything to the GPU/Device
-            image_A = image_A.to(device)
-            math_A = math_A.to(device)
-            image_B = image_B.to(device)
-            math_B = math_B.to(device)
-            label = label.to(device)
+            image_anc = image_anc.to(device)
+            math_anc = math_anc.to(device)
+            image_pos = image_pos.to(device)
+            math_pos = math_pos.to(device)
+            image_neg = image_neg.to(device)
+            math_neg = math_neg.to(device)
             
             # Reset gradients
             optimizer.zero_grad()
             
-            # Forward Pass: Push both loops through their independent towers
-            embed_A, embed_B = model(image_A, math_A, image_B, math_B)
+            # Forward Pass: Push triplets through their independent towers
+            embed_anc, embed_pos, embed_neg = model(image_anc, math_anc, image_pos, math_pos, image_neg, math_neg)
             
-            # Calculate Metric Distance and Loss
-            loss = criterion(embed_A, embed_B, label)
+            # Calculate Triplet Loss
+            loss = criterion(embed_anc, embed_pos, embed_neg)
             
             # Backward Pass
             loss.backward()
@@ -171,7 +210,7 @@ def train():
                 label = label.to(device)
                 
                 embed_A, embed_B = model(image_A, math_A, image_B, math_B)
-                loss = criterion(embed_A, embed_B, label)
+                loss = val_criterion(embed_A, embed_B, label)
                 val_loss += loss.item()
                 
         avg_val_loss = val_loss / len(val_dataloader)

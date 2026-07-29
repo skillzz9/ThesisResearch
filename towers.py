@@ -18,11 +18,14 @@ class MusicTower(nn.Module):
         except AttributeError:
             self.resnet = models.resnet18(pretrained=True)
             
-        # Hybrid Fine-Tuning: Freeze early layers (conv1, bn1, layer1, layer2)
+        # Hybrid Fine-Tuning: Freeze early layers (conv1, bn1, layer1)
+        # Unfrozen layer2 to learn audio-specific textures!
         for name, child in self.resnet.named_children():
-            if name in ['conv1', 'bn1', 'relu', 'maxpool', 'layer1', 'layer2']:
+            if name in ['conv1', 'bn1', 'relu', 'maxpool', 'layer1']:
                 for param in child.parameters():
                     param.requires_grad = False
+                    
+        self.visual_dropout = nn.Dropout(p=0.4)
                     
         # Replace the Average Pooling layer with Adaptive Max Pooling
         self.resnet.avgpool = nn.AdaptiveMaxPool2d((1, 1))
@@ -66,6 +69,7 @@ class MusicTower(nn.Module):
         visual_features = self.resnet(image_tensor)
         # Explicit flatten as a safety net ensuring it is 2D
         visual_features = visual_features.view(visual_features.size(0), -1)
+        visual_features = self.visual_dropout(visual_features)
         
         # 2. Process mathematical features (Outputs [Batch, 128])
         math_features = self.math_mlp(math_vector)

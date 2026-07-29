@@ -15,12 +15,16 @@ class SiameseNetwork(nn.Module):
         # Instantiate a SINGLE tower (Shared Weights)
         self.tower = MusicTower()
         
-    def forward(self, image_A, math_A, image_B, math_B):
+    def forward(self, image_A, math_A, image_B, math_B, image_C=None, math_C=None):
         """
-        Forward pass for both loops simultaneously through the shared network.
-        Returns the two 64-dimensional unit hypersphere embeddings.
+        Forward pass for loops simultaneously through the shared network.
+        Returns the unit hypersphere embeddings.
         """
         embed_A = self.tower(image_A, math_A)
         embed_B = self.tower(image_B, math_B)
         
+        if image_C is not None and math_C is not None:
+            embed_C = self.tower(image_C, math_C)
+            return embed_A, embed_B, embed_C
+            
         return embed_A, embed_B

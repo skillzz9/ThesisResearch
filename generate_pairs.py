@@ -94,9 +94,9 @@ def generate_pair_dataset(vectors_dir, output_csv="dataset_pairs.csv"):
                 if is_useful_combination(a["category"], b["category"]):
                     valid_combos.append((a["filepath"], b["filepath"]))
             
-            # Max 1 random combination per song-block to maximize diversity
-            if len(valid_combos) > 1:
-                valid_combos = random.sample(valid_combos, 1)
+            # Max 5 random combinations per song-block to maximize diversity but increase volume
+            if len(valid_combos) > 5:
+                valid_combos = random.sample(valid_combos, 5)
                 
             for file_a, file_b in valid_combos:
                 # 1. Standard Positive
@@ -109,6 +109,21 @@ def generate_pair_dataset(vectors_dir, output_csv="dataset_pairs.csv"):
                 # 3. Hard Negative: Pitch-Clash
                 clash_shift = random.choice([-2, -1, 1, 2])
                 negatives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": clash_shift, "label": 0})
+
+    # 4. Hard Negative: Structure-Clash (Same Track, Different Place)
+    track_grouped = df.groupby("track")
+    for track, group in track_grouped:
+        places = group["place"].unique()
+        if len(places) >= 2:
+            for _ in range(len(group) * 2): 
+                p1, p2 = random.sample(list(places), 2)
+                row_a = group[group["place"] == p1].sample(1).iloc[0]
+                row_b = group[group["place"] == p2].sample(1).iloc[0]
+                
+                # Ensure useful combination
+                if is_useful_combination(row_a["category"], row_b["category"]):
+                    negatives.append({"file_A": row_a["filepath"], "shift_A": 0, "file_B": row_b["filepath"], "shift_B": 0, "label": 0})
+
 
     # Cross-Track Easy Negatives (Targeted)
     tracks = df["track"].unique()
