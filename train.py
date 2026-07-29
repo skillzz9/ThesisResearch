@@ -111,8 +111,8 @@ class LoopTripletDataset(Dataset):
 
 def train():
     # 1. Setup Data
-    print(">>> 1. Initializing Triplet Dataset and DataLoader...")
-    dataset = LoopTripletDataset("train_pairs.csv")
+    print(">>> 1. Initializing Pair Dataset and DataLoader...")
+    dataset = LoopPairDataset("train_pairs.csv")
     
     # We use num_workers=0 to safely handle the temporary file writing in the dataset
     batch_size = 16
@@ -131,9 +131,9 @@ def train():
     print(f">>> 2. Neural Network dispatched to device: [{device.type.upper()}]")
     
     # 3. Initialize Model and Loss
-    print(">>> 3. Initializing True Siamese Network and Triplet Margin Loss...")
+    print(">>> 3. Initializing True Siamese Network and Contrastive Loss...")
     model = SiameseNetwork().to(device)
-    criterion = torch.nn.TripletMarginLoss(margin=2.0, p=2).to(device)
+    criterion = ContrastiveLoss(margin=2.0).to(device)
     val_criterion = ContrastiveLoss(margin=2.0).to(device)
     
     # 4. Setup Optimizer
@@ -159,23 +159,22 @@ def train():
         
         print(f"+++ EPOCH {epoch+1}/{num_epochs} STARTED +++")
         
-        for batch_idx, (image_anc, math_anc, image_pos, math_pos, image_neg, math_neg) in enumerate(dataloader):
+        for batch_idx, (image_A, math_A, image_B, math_B, label) in enumerate(dataloader):
             # Send everything to the GPU/Device
-            image_anc = image_anc.to(device)
-            math_anc = math_anc.to(device)
-            image_pos = image_pos.to(device)
-            math_pos = math_pos.to(device)
-            image_neg = image_neg.to(device)
-            math_neg = math_neg.to(device)
+            image_A = image_A.to(device)
+            math_A = math_A.to(device)
+            image_B = image_B.to(device)
+            math_B = math_B.to(device)
+            label = label.to(device)
             
             # Reset gradients
             optimizer.zero_grad()
             
-            # Forward Pass: Push triplets through their independent towers
-            embed_anc, embed_pos, embed_neg = model(image_anc, math_anc, image_pos, math_pos, image_neg, math_neg)
+            # Forward Pass: Push pairs through their shared tower
+            embed_A, embed_B = model(image_A, math_A, image_B, math_B)
             
-            # Calculate Triplet Loss
-            loss = criterion(embed_anc, embed_pos, embed_neg)
+            # Calculate Contrastive Loss
+            loss = criterion(embed_A, embed_B, label)
             
             # Backward Pass
             loss.backward()

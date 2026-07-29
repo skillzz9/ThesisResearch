@@ -1,0 +1,15 @@
+=======================================================
+               FIRST ATTEMPT RESULTS
+=======================================================
+
+Metric                          | Score
+--------------------------------|-----------
+Optimal Distance Threshold      | 0.8000
+Seen Data Accuracy (Train)      | 82.45%
+Unseen Data Accuracy (Test)     | 62.78%
+Overfitting Gap                 | 19.67%
+Test Positive Recall (Matches)  | 53.24%
+Test Negative Recall (Clashes)  | 73.22%
+ROC-AUC Score                   | 69.80%
+
+=======================================================

@@ -74,9 +74,13 @@ class MusicTower(nn.Module):
         # 2. Process mathematical features (Outputs [Batch, 128])
         math_features = self.math_mlp(math_vector)
         
-        # 3. Concatenate features along the feature dimension (Outputs [Batch, 640])
-        fused = torch.cat((visual_features, math_features), dim=1)
+        # 3. Apply independent L2 Normalization to prevent architectural bias
+        visual_features = F.normalize(visual_features, p=2, dim=1)
+        math_features = F.normalize(math_features, p=2, dim=1)
         
+        # 4. Concatenate features along the feature dimension (Outputs [Batch, 640])
+        fused = torch.cat((visual_features, math_features), dim=1)
+
         # 4. Process through final funnel (Outputs [Batch, 64])
         embedding = self.fusion_mlp(fused)
         
