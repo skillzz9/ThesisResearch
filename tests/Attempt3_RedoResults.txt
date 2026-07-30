@@ -1,0 +1,15 @@
+=======================================================
+               ATTEMPT 3 REDO RESULTS (Optimization)
+=======================================================
+
+Metric                          | Score
+--------------------------------|-----------
+Optimal Distance Threshold      | 0.2300
+Seen Data Accuracy (Train)      | 65.93%
+Unseen Data Accuracy (Test)     | 62.43%
+Overfitting Gap                 | 3.49%
+Test Positive Recall (Matches)  | 69.04%
+Test Negative Recall (Clashes)  | 55.21%
+ROC-AUC Score                   | 65.08%
+
+=======================================================

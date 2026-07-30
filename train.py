@@ -10,8 +10,8 @@ from torch.optim import Adam
 # Import our custom architecture components
 from towers import MusicTower
 from siamese import SiameseNetwork
-from loss import ContrastiveLoss
-
+import torch.nn as nn
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 # Import the base feature extractors from our modular pipelines
 from left_eye.feature_extractor import VisualFeatureExtractor
 from right_eye.pipeline import RightEyePipeline
@@ -111,36 +111,38 @@ class LoopTripletDataset(Dataset):
 
 def train():
     # 1. Setup Data
-    print(">>> 1. Initializing Pair Dataset and DataLoader...")
-    dataset = LoopPairDataset("train_pairs.csv")
+    print(">>> 1. Initializing Triplet Dataset and DataLoader...")
+    dataset = LoopTripletDataset("train_pairs.csv")
     
-    # We use num_workers=0 to safely handle the temporary file writing in the dataset
     batch_size = 16
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     
-    print(f"     -> Dataset loaded successfully with {len(dataset)} total pairs.")
+    print(f"     -> Dataset loaded successfully with {len(dataset)} total triplets.")
     print(f"     -> Total Batches per Epoch: {len(dataloader)} (Batch Size: {batch_size})")
     
     print(">>> 1.5 Initializing Validation DataLoader...")
-    val_dataset = LoopPairDataset("test_pairs.csv")
+    val_dataset = LoopTripletDataset("test_pairs.csv")
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    print(f"     -> Validation Dataset loaded with {len(val_dataset)} pairs.")
+    print(f"     -> Validation Dataset loaded with {len(val_dataset)} triplets.")
     
     # 2. Setup Device
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f">>> 2. Neural Network dispatched to device: [{device.type.upper()}]")
     
     # 3. Initialize Model and Loss
-    print(">>> 3. Initializing True Siamese Network and Contrastive Loss...")
+    print(">>> 3. Initializing True Siamese Network and Triplet Margin Loss...")
     model = SiameseNetwork().to(device)
-    criterion = ContrastiveLoss(margin=2.0).to(device)
-    val_criterion = ContrastiveLoss(margin=2.0).to(device)
+    # 1. LOWER MARGIN: Margin of 2.0 on L2-Normalized vectors forces negatives to the exact opposite side of the universe, causing collapse. 0.5 is mathematically stable.
+    criterion = nn.TripletMarginLoss(margin=0.5).to(device)
+    val_criterion = nn.TripletMarginLoss(margin=0.5).to(device)
     
     # 4. Setup Optimizer
-    # IMPORTANT: We filter out frozen parameters (layer1/2) so Adam doesn't waste compute tracking them
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
-    # Lowered learning rate to 0.0001 and added weight decay to fight Overfitting
-    optimizer = Adam(trainable_params, lr=0.0001, weight_decay=1e-4)
+    # 2. ADAM-W & LOWER LR: Triplet loss is highly unstable. AdamW + 2e-5 prevents weights from exploding.
+    from torch.optim import AdamW
+    optimizer = AdamW(trainable_params, lr=2e-5, weight_decay=1e-4)
+    # 4.5 Setup Learning Rate Scheduler
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
     
     # 5. Training Loop
     # Reduced to 15 epochs to prevent the model from memorizing the training data (Early Stopping)
@@ -159,22 +161,27 @@ def train():
         
         print(f"+++ EPOCH {epoch+1}/{num_epochs} STARTED +++")
         
-        for batch_idx, (image_A, math_A, image_B, math_B, label) in enumerate(dataloader):
+        for batch_idx, (img_anc, math_anc, img_pos, math_pos, img_neg, math_neg) in enumerate(dataloader):
             # Send everything to the GPU/Device
-            image_A = image_A.to(device)
-            math_A = math_A.to(device)
-            image_B = image_B.to(device)
-            math_B = math_B.to(device)
-            label = label.to(device)
+            img_anc, math_anc = img_anc.to(device), math_anc.to(device)
+            img_pos, math_pos = img_pos.to(device), math_pos.to(device)
+            img_neg, math_neg = img_neg.to(device), math_neg.to(device)
             
             # Reset gradients
             optimizer.zero_grad()
             
-            # Forward Pass: Push pairs through their shared tower
-            embed_A, embed_B = model(image_A, math_A, image_B, math_B)
+            # Forward Pass: Push triplets through their shared tower
+            embed_anc, embed_pos, embed_neg = model(img_anc, math_anc, img_pos, math_pos, img_neg, math_neg)
             
-            # Calculate Contrastive Loss
-            loss = criterion(embed_A, embed_B, label)
+            # 3. BATCH HARD NEGATIVE MINING
+            # Calculate distance between every Anchor and every Negative in this batch [16x16]
+            dist_matrix = torch.cdist(embed_anc, embed_neg)
+            # Find the negative that is CLOSEST (hardest to tell apart) for each Anchor
+            hardest_neg_indices = torch.argmin(dist_matrix, dim=1)
+            hard_embed_neg = embed_neg[hardest_neg_indices]
+            
+            # Calculate Triplet Loss using the hardest negatives
+            loss = criterion(embed_anc, embed_pos, hard_embed_neg)
             
             # Backward Pass
             loss.backward()
@@ -203,19 +210,28 @@ def train():
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for image_A, math_A, image_B, math_B, label in val_dataloader:
-                image_A, math_A = image_A.to(device), math_A.to(device)
-                image_B, math_B = image_B.to(device), math_B.to(device)
-                label = label.to(device)
+            for img_anc, math_anc, img_pos, math_pos, img_neg, math_neg in val_dataloader:
+                img_anc, math_anc = img_anc.to(device), math_anc.to(device)
+                img_pos, math_pos = img_pos.to(device), math_pos.to(device)
+                img_neg, math_neg = img_neg.to(device), math_neg.to(device)
                 
-                embed_A, embed_B = model(image_A, math_A, image_B, math_B)
-                loss = val_criterion(embed_A, embed_B, label)
+                embed_anc, embed_pos, embed_neg = model(img_anc, math_anc, img_pos, math_pos, img_neg, math_neg)
+                
+                # Validation Hard Negative Mining
+                dist_matrix = torch.cdist(embed_anc, embed_neg)
+                hardest_neg_indices = torch.argmin(dist_matrix, dim=1)
+                hard_embed_neg = embed_neg[hardest_neg_indices]
+                
+                loss = val_criterion(embed_anc, embed_pos, hard_embed_neg)
                 val_loss += loss.item()
                 
         avg_val_loss = val_loss / len(val_dataloader)
         
         history['train_loss'].append(avg_loss)
         history['val_loss'].append(avg_val_loss)
+        
+        # Step the Learning Rate Scheduler
+        scheduler.step(avg_val_loss)
         
         epoch_duration = time.time() - epoch_start_time
         print(f"\n=== EPOCH {epoch+1} FINISHED ===")
@@ -239,7 +255,7 @@ def train():
     plt.plot(range(1, num_epochs+1), history['val_loss'], label='Validation Loss (Tracks 17-20)', color='red', marker='x')
     plt.title('Training vs Validation Loss (The Concrete Ceiling)')
     plt.xlabel('Epochs')
-    plt.ylabel('Contrastive Loss')
+    plt.ylabel('Triplet Loss')
     plt.legend()
     plt.grid(True)
     

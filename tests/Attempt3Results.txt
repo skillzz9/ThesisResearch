@@ -1,0 +1,15 @@
+=======================================================
+               ATTEMPT 3 RESULTS (Triplet Loss)
+=======================================================
+
+Metric                          | Score
+--------------------------------|-----------
+Optimal Distance Threshold      | 0.0100
+Seen Data Accuracy (Train)      | 60.67%
+Unseen Data Accuracy (Test)     | 57.08%
+Overfitting Gap                 | 3.60%
+Test Positive Recall (Matches)  | 61.40%
+Test Negative Recall (Clashes)  | 52.35%
+ROC-AUC Score                   | 59.55%
+
+=======================================================
