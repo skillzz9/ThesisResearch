@@ -114,7 +114,9 @@ def train():
     print(">>> 1. Initializing Triplet Dataset and DataLoader...")
     dataset = LoopTripletDataset("train_pairs.csv")
     
-    batch_size = 16
+    # Increased batch size to 256 to drastically speed up training on the RTX 4090
+    # and to give Hard Negative Mining a much larger pool (256) of negatives to choose from!
+    batch_size = 256
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     
     print(f"     -> Dataset loaded successfully with {len(dataset)} total triplets.")
