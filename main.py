@@ -12,10 +12,10 @@ def run_master_pipeline():
     The master orchestrator.
     Runs every phase of the pipeline from raw stems to a fully trained neural network.
     """
-    root_dir = "/Users/hugoposthuma/Downloads/Thesis/babyslakh_16k"
+    root_dir = "/workspace/slakh2100_flac_redux"
     
-    # 1. Discover all tracks
-    tracks = sorted([d for d in glob.glob(os.path.join(root_dir, "Track*")) if os.path.isdir(d)])
+    # 1. Discover all tracks (recursively, since they are inside train/, test/, validation/)
+    tracks = sorted([d for d in glob.glob(os.path.join(root_dir, "**", "Track*"), recursive=True) if os.path.isdir(d)])
     
     if not tracks:
         print(f"CRITICAL ERROR: No track directories found in {root_dir}")
@@ -43,6 +43,12 @@ def run_master_pipeline():
     print(" PHASE 3: Generating Siamese Pair Dataset (dataset_pairs.csv)")
     print("=================================================================")
     generate_pair_dataset(root_dir, "dataset_pairs.csv")
+    
+    print("\n=================================================================")
+    print(" PHASE 3.5: Splitting into 80/20 Train/Test Sets")
+    print("=================================================================")
+    from split_dataset import split_dataset
+    split_dataset("dataset_pairs.csv")
     
     # 4. Train the Neural Network
     print("\n=================================================================")
