@@ -1,7 +1,7 @@
 import os
 import glob
 import mido
-import scipy.io.wavfile as wavfile
+import soundfile as sf
 import numpy as np
 
 def extract_bpm_from_midi(midi_path):
@@ -35,15 +35,15 @@ def process_track(track_dir):
     track_folder_name = os.path.basename(track_dir.strip("/"))
     track_id_str = track_folder_name.lower().replace("track", "track_")
     
-    # 3. Find and slice stems
-    wav_files = sorted(glob.glob(os.path.join(stems_dir, "*.wav")))
-    if not wav_files:
-        print(f"No .wav files found in {stems_dir}")
+    # 3. Find and slice stems (Slakh uses .flac)
+    flac_files = sorted(glob.glob(os.path.join(stems_dir, "*.flac")))
+    if not flac_files:
+        print(f"No .flac files found in {stems_dir}")
         return
         
-    for wav_file in wav_files:
-        stem_filename = os.path.basename(wav_file)
-        stem_name = stem_filename.replace(".wav", "")
+    for flac_file in flac_files:
+        stem_filename = os.path.basename(flac_file)
+        stem_name = stem_filename.replace(".flac", "")
         
         # Convert "S01" -> "stem1", "S10" -> "stem10"
         if stem_name.startswith("S"):
@@ -57,8 +57,8 @@ def process_track(track_dir):
             
         print(f"Slicing {stem_filename} -> {stem_id_str}...")
         
-        # Load audio (assuming it's a standard uncompressed WAV)
-        sample_rate, audio_data = wavfile.read(wav_file)
+        # Load audio using soundfile
+        audio_data, sample_rate = sf.read(flac_file)
         
         # Calculate exactly how many samples represent our loop duration
         samples_per_loop = int(round(loop_duration_sec * sample_rate))
@@ -71,22 +71,18 @@ def process_track(track_dir):
             start_idx = i * samples_per_loop
             end_idx = start_idx + samples_per_loop
             
-            # Slice exactly 96000 samples (if 16kHz at 80BPM)
             chunk = audio_data[start_idx:end_idx]
             
-            # Check for pure silence. If the chunk is completely silent, skip saving it.
-            # We cast to float to safely use abs() avoiding int16 overflow issues.
+            # Check for pure silence
             if np.max(np.abs(chunk.astype(float))) < 1e-4:
                 continue
             
-            # Place index (1-based, zero-padded to 2 digits, e.g., 01, 02, 10)
-            # This represents the absolute grid location, preserving compatibility even if earlier loops were silent.
             place = i + 1
             loop_filename = f"{track_id_str}_{stem_id_str}_place{place:02d}.wav"
             loop_path = os.path.join(loops_dir, loop_filename)
             
-            # Save the new chunk
-            wavfile.write(loop_path, sample_rate, chunk)
+            # Save the new chunk as wav so extract_features.py can read it
+            sf.write(loop_path, chunk, sample_rate)
             
     print(f"\nFinished! All loops successfully saved to:\n{loops_dir}")
 
