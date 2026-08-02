@@ -22,16 +22,41 @@ def extract_loop_features(track_dir):
     right_eye = RightEyePipeline()
     
     wav_files = sorted(glob.glob(os.path.join(loops_dir, "*.wav")))
+    
+    # MASSIVE SPEEDUP: Cap to a maximum of 40 loops per track to prevent overkill
+    if len(wav_files) > 40:
+        import random
+        random.seed(42) # Deterministic shuffle
+        wav_files = random.sample(wav_files, 40)
+        
     print(f"Found {len(wav_files)} loops. Extracting features to .pt files...")
     
     for i, wav_path in enumerate(wav_files):
+        # FAST RESUME: Check if all 7 shifts already exist to skip this loop instantly
+        shifts = [-3, -2, -1, 0, 1, 2, 3]
+        all_exist = True
+        for shift in shifts:
+            basename = os.path.basename(wav_path).replace(".wav", f"_shift{shift}.pt")
+            pt_path = os.path.join(vectors_dir, basename)
+            if not os.path.exists(pt_path):
+                all_exist = False
+                break
+                
+        if all_exist:
+            # Skip the heavy librosa/openSMILE CPU math!
+            continue
+            
         # Load the base audio file once
         y_base, sr = librosa.load(wav_path, sr=22050)
         
-        # We will generate features for standard pitch (0) and augmented pitches
-        shifts = [-3, -2, -1, 0, 1, 2, 3]
-        
         for shift in shifts:
+            basename = os.path.basename(wav_path).replace(".wav", f"_shift{shift}.pt")
+            pt_path = os.path.join(vectors_dir, basename)
+            
+            # Skip this specific shift if it was partially completed before crashing
+            if os.path.exists(pt_path):
+                continue
+                
             # 1. Pitch Shift the audio
             if shift != 0:
                 y = librosa.effects.pitch_shift(y_base, sr=sr, n_steps=shift)
@@ -43,24 +68,16 @@ def extract_loop_features(track_dir):
             image_tensor = torch.tensor(stacked_features, dtype=torch.float32)
             
             # 3. Extract Right Eye (Mathematical)
-            # Write shifted audio to temp file so Right Eye can read it
             fd, temp_path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
             try:
                 sf.write(temp_path, y, sr)
                 math_vector_np = right_eye.get_vector(temp_path)
                 math_vector = torch.tensor(math_vector_np, dtype=torch.float32)
-                
-                # FIX: Removed the bad cross-feature z-score normalization. 
-                # Raw features will now be saved to disk, and column-wise scaling will happen during training.
             finally:
                 os.remove(temp_path)
             
             # 4. Save as a dictionary in a .pt file
-            # Format: track_00001_stem1_place01_shift3.pt
-            basename = os.path.basename(wav_path).replace(".wav", f"_shift{shift}.pt")
-            pt_path = os.path.join(vectors_dir, basename)
-            
             torch.save({
                 'image_tensor': image_tensor,
                 'math_vector': math_vector
