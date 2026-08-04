@@ -26,17 +26,25 @@ def run_master_pipeline():
     print("=================================================================\n")
     
     # 2. Iterate through each track to Slice and Extract
-    for track_dir in tracks:
+    print(f"\n{'='*50}")
+    print(f" PHASE 1 & 2: Slicing & Feature Extraction (12-Core Parallel)")
+    print(f"{'='*50}")
+    
+    import multiprocessing
+    
+    def process_single_track(track_dir):
         track_name = os.path.basename(track_dir)
-        print(f"\n{'='*50}")
-        print(f" PHASE 1 & 2: Slicing & Feature Extraction [{track_name}]")
-        print(f"{'='*50}")
-        
-        # Phase 1: Slice stems into 8-beat .wav loops based on MIDI BPM
+        print(f"--> Processing [{track_name}]")
         process_track(track_dir)
-        
-        # Phase 2: Pitch-shift loops and extract Visual + Math .pt tensors
         extract_loop_features(track_dir)
+        return track_name
+
+    # Use all available CPU cores to process tracks simultaneously
+    num_cores = multiprocessing.cpu_count()
+    print(f"🚀 UNLEASHING {num_cores} CPU CORES FOR MAXIMUM SPEED! 🚀")
+    
+    with multiprocessing.Pool(processes=num_cores) as pool:
+        pool.map(process_single_track, tracks)
         
     # 3. Build the Metric Learning Dataset
     print("\n=================================================================")
