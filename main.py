@@ -1,4 +1,11 @@
 import os
+# CRITICAL FIX: Prevent Numpy/Librosa from hijacking all 12 cores for a single track!
+os.environ["OMP_NUM_THREADS"] = "1" 
+os.environ["OPENBLAS_NUM_THREADS"] = "1" 
+os.environ["MKL_NUM_THREADS"] = "1" 
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1" 
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import glob
 
 # Import the core modules of our pipeline
