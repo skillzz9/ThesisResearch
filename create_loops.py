@@ -12,12 +12,30 @@ def extract_bpm_from_midi(midi_path):
         raise ValueError(f"No tempo found in {midi_path}")
     return mido.tempo2bpm(tempos[0])
 
+def is_4_4_time(midi_path):
+    """Checks if the MIDI file is strictly in 4/4 time."""
+    mid = mido.MidiFile(midi_path)
+    for track in mid.tracks:
+        for msg in track:
+            if msg.type == 'time_signature':
+                if msg.numerator == 4 and msg.denominator == 4:
+                    return True
+                else:
+                    return False
+    # If no time signature is explicitly set in MIDI, the default is always 4/4
+    return True
+
 def process_track(track_dir):
     """Processes a track directory by slicing its stems into 8-beat loops."""
     stems_dir = os.path.join(track_dir, "stems")
     midi_path = os.path.join(track_dir, "all_src.mid")
     loops_dir = os.path.join(track_dir, "loops")
     
+    # FILTER: Only process 4/4 songs!
+    if not is_4_4_time(midi_path):
+        print(f"--- Skipping Track: {track_dir} (Not 4/4 Time) ---")
+        return
+        
     if not os.path.exists(loops_dir):
         os.makedirs(loops_dir)
         
