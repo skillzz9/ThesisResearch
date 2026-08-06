@@ -103,11 +103,11 @@ def generate_pair_dataset(vectors_dir, output_csv="dataset_pairs.csv"):
                 positives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": 0, "label": 1})
                 
                 # 2. Augmented Positive
-                sync_shift = random.choice([-3, -2, -1, 1, 2, 3])
+                sync_shift = random.choice([-2, 2])
                 positives.append({"file_A": file_a, "shift_A": sync_shift, "file_B": file_b, "shift_B": sync_shift, "label": 1})
                 
                 # 3. Hard Negative: Pitch-Clash
-                clash_shift = random.choice([-2, -1, 1, 2])
+                clash_shift = random.choice([-2, 2])
                 negatives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": clash_shift, "label": 0})
 
     # 4. Hard Negative: Structure-Clash (Same Track, Different Place)

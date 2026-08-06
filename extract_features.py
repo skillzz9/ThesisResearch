@@ -23,17 +23,45 @@ def extract_loop_features(track_dir):
     
     wav_files = sorted(glob.glob(os.path.join(loops_dir, "*.wav")))
     
-    # MASSIVE SPEEDUP: Cap to a maximum of 40 loops per track to prevent overkill
-    if len(wav_files) > 40:
-        import random
-        random.seed(42) # Deterministic shuffle
-        wav_files = random.sample(wav_files, 40)
+    # --- THE GOLDEN MEASURE APPROACH ---
+    # Group the wav files by their "place" (measure)
+    from collections import defaultdict
+    import random
+    random.seed(42) # Deterministic
+    
+    places = defaultdict(list)
+    for w in wav_files:
+        # Expected format: track_00001_stem1_place01.wav
+        basename = os.path.basename(w)
+        parts = basename.replace(".wav", "").split("_")
+        if len(parts) >= 4:
+            place_id = parts[3] # "place01"
+            places[place_id].append(w)
+            
+    # Find Golden Measures (measures where at least 3 instruments are playing)
+    golden_measures = {p: files for p, files in places.items() if len(files) >= 3}
+    
+    # If no measure has 3+ instruments, fallback to measures with 2+ instruments
+    if not golden_measures:
+        golden_measures = {p: files for p, files in places.items() if len(files) >= 2}
         
-    print(f"Found {len(wav_files)} loops. Extracting features to .pt files...")
+    # Select just 2 specific Golden Measures to extract (Max Diversity, Extreme Speed)
+    selected_measures = []
+    if len(golden_measures) > 2:
+        selected_keys = random.sample(list(golden_measures.keys()), 2)
+        for k in selected_keys:
+            selected_measures.extend(golden_measures[k])
+    else:
+        for files in golden_measures.values():
+            selected_measures.extend(files)
+            
+    wav_files = selected_measures
+    
+    print(f"Found {len(wav_files)} loops in Golden Measures. Extracting features to .pt files...")
     
     for i, wav_path in enumerate(wav_files):
-        # FAST RESUME: Check if all 7 shifts already exist to skip this loop instantly
-        shifts = [-3, -2, -1, 0, 1, 2, 3]
+        # FAST RESUME: Limit shifts to just [-2, 0, 2] for 60% massive speedup
+        shifts = [-2, 0, 2]
         all_exist = True
         for shift in shifts:
             basename = os.path.basename(wav_path).replace(".wav", f"_shift{shift}.pt")
