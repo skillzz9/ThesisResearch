@@ -125,25 +125,8 @@ def generate_pair_dataset(vectors_dir, output_csv="dataset_pairs.csv"):
                     negatives.append({"file_A": row_a["filepath"], "shift_A": 0, "file_B": row_b["filepath"], "shift_B": 0, "label": 0})
 
 
-    # Cross-Track Easy Negatives (Targeted)
-    tracks = df["track"].unique()
-    if len(tracks) >= 2:
-        for _ in range(len(positives) * 2): 
-            t1, t2 = random.sample(list(tracks), 2)
-            
-            # Grab random stems from each track
-            row_a = df[df["track"] == t1].sample(1).iloc[0]
-            row_b = df[df["track"] == t2].sample(1).iloc[0]
-            
-            # Only append if they are a useful combination
-            if is_useful_combination(row_a["category"], row_b["category"]):
-                negatives.append({
-                    "file_A": row_a["filepath"], "shift_A": 0,
-                    "file_B": row_b["filepath"], "shift_B": 0,
-                    "label": 0
-                })
-
-    # Balance 50/50
+    # (Cross-Track Negatives have been removed to prevent BPM shortcut learning!)
+    # All negatives are now generated exclusively from within the exact same song.
     random.shuffle(positives)
     random.shuffle(negatives)
     
