@@ -106,6 +106,15 @@ class LoopTripletDataset(Dataset):
         neg_row = self.negatives.sample(1).iloc[0]
         image_neg, math_neg = self._load_tensor_dict(neg_row['file_B'])
         
+        # --- DYNAMIC HARD NEGATIVES (Tempo-Drift) ---
+        if 'type' in neg_row and neg_row['type'] == 'tempo_drift':
+            import torch.nn.functional as F
+            # Stretch the time dimension by 10% to simulate rushing/dragging
+            image_neg = image_neg.unsqueeze(0) # Add batch dim: [1, 3, 84, 350]
+            image_neg = F.interpolate(image_neg, size=(84, int(350 * 1.1)), mode='bilinear', align_corners=False)
+            image_neg = image_neg.squeeze(0)   # Remove batch dim
+            image_neg = image_neg[:, :, :350]  # Crop back to exactly 350 frames
+            
         return image_anc, math_anc, image_pos, math_pos, image_neg, math_neg
 
 

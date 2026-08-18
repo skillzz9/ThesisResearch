@@ -76,7 +76,9 @@ def evaluate_honest():
     model = SiameseNetwork().to(device)
     
     # Auto-load the newest weights from the models folder
-    if os.path.exists("models/Attempt3_Redo.pth"):
+    if os.path.exists("models/Attempt4.pth"):
+        weights_path = "models/Attempt4.pth"
+    elif os.path.exists("models/Attempt3_Redo.pth"):
         weights_path = "models/Attempt3_Redo.pth"
     elif os.path.exists("models/Attempt3.pth"):
         weights_path = "models/Attempt3.pth"

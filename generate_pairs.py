@@ -100,30 +100,31 @@ def generate_pair_dataset(vectors_dir, output_csv="dataset_pairs.csv"):
                 
             for file_a, file_b in valid_combos:
                 # 1. Standard Positive
-                positives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": 0, "label": 1})
+                positives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": 0, "label": 1, "type": "standard"})
                 
                 # 2. Augmented Positive
                 sync_shift = random.choice([-2, 2])
-                positives.append({"file_A": file_a, "shift_A": sync_shift, "file_B": file_b, "shift_B": sync_shift, "label": 1})
+                positives.append({"file_A": file_a, "shift_A": sync_shift, "file_B": file_b, "shift_B": sync_shift, "label": 1, "type": "augmented"})
                 
                 # 3. Hard Negative: Pitch-Clash
                 clash_shift = random.choice([-2, 2])
-                negatives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": clash_shift, "label": 0})
+                negatives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": clash_shift, "label": 0, "type": "pitch_clash"})
 
-    # 4. Hard Negative: Structure-Clash (Same Track, Different Place)
+                # 4. Hard Negative: Tempo-Drift (Stretched in DataLoader)
+                negatives.append({"file_A": file_a, "shift_A": 0, "file_B": file_b, "shift_B": 0, "label": 0, "type": "tempo_drift"})
+
+    # 5. Hard Negative: Instrument-Clash (Same Category, Different Place)
     track_grouped = df.groupby("track")
     for track, group in track_grouped:
-        places = group["place"].unique()
-        if len(places) >= 2:
-            for _ in range(len(group) * 2): 
-                p1, p2 = random.sample(list(places), 2)
-                row_a = group[group["place"] == p1].sample(1).iloc[0]
-                row_b = group[group["place"] == p2].sample(1).iloc[0]
-                
-                # Ensure useful combination
-                if is_useful_combination(row_a["category"], row_b["category"]):
-                    negatives.append({"file_A": row_a["filepath"], "shift_A": 0, "file_B": row_b["filepath"], "shift_B": 0, "label": 0})
-
+        for category in ["Bass", "Drums", "Melody"]:
+            cat_group = group[group["category"] == category]
+            places = cat_group["place"].unique()
+            if len(places) >= 2:
+                for _ in range(len(cat_group)): 
+                    p1, p2 = random.sample(list(places), 2)
+                    row_a = cat_group[cat_group["place"] == p1].sample(1).iloc[0]
+                    row_b = cat_group[cat_group["place"] == p2].sample(1).iloc[0]
+                    negatives.append({"file_A": row_a["filepath"], "shift_A": 0, "file_B": row_b["filepath"], "shift_B": 0, "label": 0, "type": "instrument_clash"})
 
     # (Cross-Track Negatives have been removed to prevent BPM shortcut learning!)
     # All negatives are now generated exclusively from within the exact same song.

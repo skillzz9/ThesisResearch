@@ -18,14 +18,14 @@ class MusicTower(nn.Module):
         except AttributeError:
             self.resnet = models.resnet18(pretrained=True)
             
-        # Hybrid Fine-Tuning: Freeze early layers (conv1, bn1, layer1)
-        # Unfrozen layer2 to learn audio-specific textures!
+        # 1. ARCHITECTURE UPGRADE: Unfreeze the ENTIRE ResNet!
+        # By removing the freeze lock on conv1 and layer1, the network will discard its
+        # pre-trained "dog/car edge detectors" and learn to detect audio frequency harmonics natively!
         for name, child in self.resnet.named_children():
-            if name in ['conv1', 'bn1', 'relu', 'maxpool', 'layer1']:
-                for param in child.parameters():
-                    param.requires_grad = False
+            for param in child.parameters():
+                param.requires_grad = True
                     
-        self.visual_dropout = nn.Dropout(p=0.4)
+        self.visual_dropout = nn.Dropout(p=0.2)
                     
         # Replace the Average Pooling layer with Adaptive Max Pooling
         self.resnet.avgpool = nn.AdaptiveMaxPool2d((1, 1))
@@ -41,11 +41,11 @@ class MusicTower(nn.Module):
             nn.Linear(90, 256),
             nn.BatchNorm1d(256),
             nn.LeakyReLU(negative_slope=0.01),
-            nn.Dropout(p=0.6),
+            nn.Dropout(p=0.3),
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.LeakyReLU(negative_slope=0.01),
-            nn.Dropout(p=0.6)
+            nn.Dropout(p=0.3)
         )
         
         # --- Fusion and Output Space ---
@@ -54,7 +54,7 @@ class MusicTower(nn.Module):
             nn.Linear(640, 512),
             nn.BatchNorm1d(512),
             nn.LeakyReLU(negative_slope=0.01),
-            nn.Dropout(p=0.6),
+            nn.Dropout(p=0.3),
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.LeakyReLU(negative_slope=0.01),

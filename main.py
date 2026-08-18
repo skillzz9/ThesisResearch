@@ -19,7 +19,7 @@ def run_master_pipeline():
     The master orchestrator.
     Runs every phase of the pipeline from raw stems to a fully trained neural network.
     """
-    root_dir = "/workspace/slakh2100_flac_redux"
+    root_dir = "/Users/hugoposthuma/Downloads/Thesis/babyslakh_16k"
     
     # 1. Discover all tracks (recursively, since they are inside train/, test/, validation/)
     tracks = sorted([d for d in glob.glob(os.path.join(root_dir, "**", "Track*"), recursive=True) if os.path.isdir(d)])
@@ -46,12 +46,16 @@ def run_master_pipeline():
         extract_loop_features(track_dir)
         return track_name
 
-    # Use all available CPU cores to process tracks simultaneously
-    num_cores = multiprocessing.cpu_count()
-    print(f"🚀 UNLEASHING {num_cores} CPU CORES FOR MAXIMUM SPEED! 🚀")
+    print(f"🚀 RUNNING IN SEQUENTIAL VERBOSE MODE FOR LOCAL TESTING 🚀")
     
-    with multiprocessing.Pool(processes=num_cores) as pool:
-        pool.map(process_single_track, tracks)
+    for track_dir in tracks:
+        print(f"\n==================================================")
+        print(f" STARTING TRACK: {os.path.basename(track_dir)}")
+        print(f"==================================================")
+        import sys
+        sys.stdout.flush() # Force MacOS to print immediately
+        
+        process_single_track(track_dir)
         
     # 3. Build the Metric Learning Dataset
     print("\n=================================================================")

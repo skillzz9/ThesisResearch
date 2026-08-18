@@ -1,0 +1,7 @@
+axis,path,seen_clash_recall,unseen_clash_recall
+key,harmony,0.07,0.07
+vertical,harmony,0.47,0.46
+pitch_jitter,harmony,0.00,0.07
+tempo,rhythm,0.96,0.36
+timing,rhythm,0.99,0.75
+jitter,rhythm,0.93,0.25
