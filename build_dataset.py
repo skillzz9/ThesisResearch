@@ -35,7 +35,6 @@ torch.set_num_threads(1)
 import build_positive_pairs as BPP
 import corruptions as C
 import midi_utils as M
-import music_theory as MT
 from left_eye.feature_extractor import VisualFeatureExtractor
 from create_loops import extract_bpm_from_midi, is_4_4_time
 
@@ -49,14 +48,16 @@ AUG_SHIFTS = [-2, -1, 1, 2]
 MIN_FILL = 0.6           # a stem's MIDI must cover >=60% of the measure with notes to be
                          # paired (measured on the MIDI we render, not Slakh's reverb-filled
                          # audio) -> stops sparse/silent loops entering the dataset
-MELODIC_MAX_POLY = 1.5   # avg simultaneous notes <= this -> "melodic" (monophonic line);
-                         # higher -> "chordal". Melody-melody pairs need >=1 melodic stem.
+MELODIC_MAX_POLY = 1.2   # avg simultaneous notes <= this -> "melodic" (a clean single line);
+                         # higher -> "chordal". Monophonic-only: ALL paired stems must be melodic.
+# A melody must also MOVE (a held pad/strings line is monophonic but sounds like a chord):
+MELODY_MAX_NOTE_BEATS = 1.5   # avg note duration must be <= this many beats (short = moving line)
+MELODY_MIN_NOTES = 4          # ...and at least this many note onsets in the 8-beat measure
 
 VFE = VisualFeatureExtractor(sample_rate=M.RENDER_SR)
 os.makedirs(OUT_DIR, exist_ok=True)
 
-LABEL_COLS = ["key", "vertical", "pitch_jitter", "tempo", "timing", "jitter"]  # Tier-1 binary gates
-QUALITY_COLS = ["register"]     # Tier-2 continuous "quality of match": 1=muddy/masked, 0=clean
+LABEL_COLS = ["key", "vertical", "tempo", "timing"]   # 4 relational compatibility gates
 
 
 def crop_or_pad(y, n):
@@ -69,11 +70,6 @@ def mean_pitch(pm):
     """Average MIDI pitch of the pitched notes (used to pick the lower/foundation stem)."""
     ps = [n.pitch for inst in pm.instruments if not inst.is_drum for n in inst.notes]
     return (sum(ps) / len(ps)) if ps else 0.0
-
-
-def reg_score(pm_a, pm_b):
-    """Tier-2 register-masking label in [0,1] for a rendered pair (symbolic music-theory oracle)."""
-    return round(MT.register_masking(MT.all_notes(pm_a), MT.all_notes(pm_b)), 4)
 
 
 def midi_coverage(pm, dur):
@@ -159,13 +155,16 @@ def select_track(track_dir):
         lo, hi = m * measure_dur, (m + 1) * measure_dur
         return any(a < hi and b > lo for a, b in ivs)
 
+    sec_per_beat = measure_dur / BPP.BEATS_PER_SLICE
+
     def stats_at(ivs, m):
-        """(coverage fraction, average polyphony) of a stem in measure m."""
+        """(coverage, avg polyphony, avg note duration in beats, note count) in measure m."""
         lo, hi = m * measure_dur, (m + 1) * measure_dur
         segs = [(max(a, lo), min(b, hi)) for a, b in ivs if a < hi and b > lo]
         if not segs:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0
         total = sum(b - a for a, b in segs)           # sum of note durations (voices x time)
+        avg_dur_beats = (total / len(segs)) / sec_per_beat
         segs.sort()
         cov, cs, ce = 0.0, segs[0][0], segs[0][1]
         for a, b in segs[1:]:
@@ -175,7 +174,7 @@ def select_track(track_dir):
                 cov += ce - cs
                 cs, ce = a, b
         cov += ce - cs
-        return cov / measure_dur, (total / cov if cov > 0 else 0.0)
+        return cov / measure_dur, (total / cov if cov > 0 else 0.0), avg_dur_beats, len(segs)
 
     active_count = [sum(1 for s in stem_ivs if active_at(stem_ivs[s], m)) for m in range(num_measures)]
 
@@ -193,11 +192,13 @@ def select_track(track_dir):
         for s in stem_ivs:
             if not active_at(stem_ivs[s], anchor):
                 continue
-            coverage, poly = stats_at(stem_ivs[s], anchor)
+            coverage, poly, avg_dur_beats, n_notes = stats_at(stem_ivs[s], anchor)
             if coverage < MIN_FILL:
                 continue
             active_here.append(s)
-            if poly <= MELODIC_MAX_POLY:              # monophonic -> a melodic line
+            # melodic = monophonic AND actually moving (excludes held pads/sustained strings)
+            if (poly <= MELODIC_MAX_POLY and avg_dur_beats <= MELODY_MAX_NOTE_BEATS
+                    and n_notes >= MELODY_MIN_NOTES):
                 melodic.add(s)
         combos = BPP.make_combos(active_here, info, rng, melodic=melodic)
         for combo_type, a, b in combos:
@@ -228,9 +229,21 @@ def process_track(track_dir):
     def pos_label():
         return {c: 1 for c in LABEL_COLS}
 
-    def emit(fa, fb, label, kind, anchor, combo, reg):
-        rows.append({"file_A": fa, "file_B": fb, **label, "register": reg,
+    def emit(fa, fb, label, kind, anchor, combo):
+        rows.append({"file_A": fa, "file_B": fb, **label,
                      "type": kind, "track": track, "anchor": anchor, "combo": combo})
+
+    def phase_of(anchor):
+        """Deterministic random absolute phase per anchor (same for every loop at that
+        anchor, so positives stay aligned and the clean cache stays consistent)."""
+        return random.Random(SEED * 7919 + anchor).uniform(0.0, measure_dur)
+
+    def pt_at_phase(pm, anchor, path):
+        """Render a loop rolled by the anchor's phase (phase augmentation) -> .pt.
+        Operates on a COPY so the caller's pm (used for corruption logic) is untouched."""
+        rolled = C.circular_shift(copy.deepcopy(pm), phase_of(anchor), measure_dur)
+        midi_to_pt(rolled, measure_samples, path)
+        return path
 
     def clean_pt(stem, anchor):
         k = (stem, anchor)
@@ -238,7 +251,7 @@ def process_track(track_dir):
             start = anchor * measure_dur
             pm = M.slice_stem_midi(M.stem_midi_path(track_dir, stem), start, start + measure_dur)
             path = os.path.join(OUT_DIR, f"{track}_{stem}_p{anchor}_clean.pt")
-            midi_to_pt(pm, measure_samples, path)
+            pt_at_phase(pm, anchor, path)                 # render phase-rolled; keep pm unrolled for logic
             clean_cache[k] = (path, pm)
         return clean_cache[k]
 
@@ -247,8 +260,7 @@ def process_track(track_dir):
         fa_clean, pmA = clean_pt(A, anchor)
         fb_clean, pmB = clean_pt(B, anchor)
 
-        emit(fa_clean, fb_clean, pos_label(), "positive", anchor, cp["combo_type"],
-             reg_score(pmA, pmB))
+        emit(fa_clean, fb_clean, pos_label(), "positive", anchor, cp["combo_type"])
         stats["pos"] += 1
 
         # augmented positive (both shifted equally) -- anti-shortcut for key/vertical
@@ -256,24 +268,11 @@ def process_track(track_dir):
         pmA_aug, pmB_aug = transpose_all(pmA, n), transpose_all(pmB, n)
         fa_aug = os.path.join(OUT_DIR, f"{track}_{A}_p{anchor}_aug{uid}.pt")
         fb_aug = os.path.join(OUT_DIR, f"{track}_{B}_p{anchor}_aug{uid}.pt")
-        midi_to_pt(pmA_aug, measure_samples, fa_aug)
-        midi_to_pt(pmB_aug, measure_samples, fb_aug)
-        emit(fa_aug, fb_aug, pos_label(), "augmented", anchor, cp["combo_type"],
-             reg_score(pmA_aug, pmB_aug))
+        pt_at_phase(pmA_aug, anchor, fa_aug)
+        pt_at_phase(pmB_aug, anchor, fb_aug)
+        emit(fa_aug, fb_aug, pos_label(), "augmented", anchor, cp["combo_type"])
         stats["aug"] += 1
         uid += 1
-
-        # register-collision variants -> spread of Tier-2 targets. An octave shift of B
-        # preserves pitch-class/tempo/timing (all Tier-1 gates stay COMPATIBLE) and only
-        # moves the two parts in/out of the same frequency band -> only 'register' changes.
-        for oct_shift in (-12, 12):
-            pmB_shift = transpose_all(pmB, oct_shift)
-            fb_shift = os.path.join(OUT_DIR, f"{track}_{B}_p{anchor}_reg{uid}.pt")
-            midi_to_pt(pmB_shift, measure_samples, fb_shift)
-            emit(fa_clean, fb_shift, pos_label(), "register_var", anchor, cp["combo_type"],
-                 reg_score(pmA, pmB_shift))
-            stats["register_var"] = stats.get("register_var", 0) + 1
-            uid += 1
 
         for axis in LABEL_COLS:
             if axis == "vertical":
@@ -284,9 +283,9 @@ def process_track(track_dir):
                 if inf.get("notes_changed", 1) == 0:
                     continue
                 fb_neg = os.path.join(OUT_DIR, f"{track}_p{anchor}_vertical{uid}.pt")
-                midi_to_pt(corr_pm, measure_samples, fb_neg)
+                pt_at_phase(corr_pm, anchor, fb_neg)
                 emit(clean_ref, fb_neg, dict(zip(LABEL_COLS, C.LABELS[axis])), axis, anchor,
-                     cp["combo_type"], reg_score(ref_pm, corr_pm))
+                     cp["combo_type"])
                 stats[axis] += 1
                 uid += 1
                 continue
@@ -297,9 +296,9 @@ def process_track(track_dir):
             if inf.get("notes_changed", 1) == 0:
                 continue
             fb_neg = os.path.join(OUT_DIR, f"{track}_{B}_p{anchor}_{axis}{uid}.pt")
-            midi_to_pt(pmBc, measure_samples, fb_neg)
+            pt_at_phase(pmBc, anchor, fb_neg)
             emit(fa_clean, fb_neg, dict(zip(LABEL_COLS, C.LABELS[axis])), axis, anchor,
-                 cp["combo_type"], reg_score(pmA, pmBc))
+                 cp["combo_type"])
             stats[axis] += 1
             uid += 1
 
@@ -339,8 +338,7 @@ def build(root_dir=ROOT_DIR, manifest=MANIFEST, n_tracks=N_TRACKS, workers=None)
     print(" DATASET BUILD COMPLETE")
     print("=" * 55)
     print(f" total pairs : {len(rows)}")
-    print(f" positives   : {stats['pos']}  | augmented: {stats['aug']}"
-          f"  | register_var: {stats.get('register_var', 0)}")
+    print(f" positives   : {stats['pos']}  | augmented: {stats['aug']}")
     for ax in LABEL_COLS:
         print(f" neg {ax:11s}: {stats[ax]}")
     print(f" manifest    : {manifest}  | features in: {OUT_DIR}/")

@@ -29,23 +29,39 @@ every slice should ultimately come from the same render domain (see PLAN.md).
 
 import numpy as np
 import librosa
+import pretty_midi
 
-# Per-axis label vectors: [key, vertical, pitch_jitter, tempo, timing, jitter]
-# (1 = compatible). Symmetric: 3 harmony axes + 3 rhythm axes.
-#   HARMONY  key          - whole melody in the wrong key (global)
-#            vertical     - melody clashes with the bass moment-to-moment (relational)
-#            pitch_jitter - each note randomly detuned -> out of tune (random)
-#   RHYTHM   tempo        - wrong speed (global)
-#            timing       - constant phase offset (relational)
-#            jitter       - each note randomly off the grid (random)
+
+def _emit_tiled(out_notes, pitch, velocity, start, dur, L, period):
+    """Place a note (and its cyclic repeats every `period`) so the loop TILES to fill
+    the window [0, L] with no leading/trailing silence. Keeps only the portions
+    overlapping [0, L]. This is what stops rhythm corruptions from leaving a single-loop
+    envelope 'tell' (silence at the start/end) that the model could cheat on."""
+    if period <= 1e-6:
+        return
+    kmin = int(np.floor((-start - dur) / period)) - 1
+    kmax = int(np.ceil((L - start) / period)) + 1
+    for k in range(kmin, kmax + 1):
+        s = start + k * period
+        e = s + dur
+        if e > 0 and s < L:
+            ss, ee = max(s, 0.0), min(e, L)
+            if ee - ss > 1e-3:
+                out_notes.append(pretty_midi.Note(velocity=velocity, pitch=pitch, start=ss, end=ee))
+
+# Per-axis label vectors: [key, vertical, tempo, timing]  (1 = compatible).
+# Four RELATIONAL compatibility axes: 2 harmony + 2 rhythm. (The single-loop
+# "quality" axes pitch_jitter/jitter were dropped; register moved to Phase 2.)
+#   HARMONY  key      - whole loop in the wrong key   (global, wrong scale)
+#            vertical - clashes with the bass moment-to-moment, but STAYS in key
+#   RHYTHM   tempo    - wrong speed                    (global)
+#            timing   - constant phase offset          (relational)
 LABELS = {
-    "positive":     [1, 1, 1, 1, 1, 1],
-    "key":          [0, 1, 1, 1, 1, 1],
-    "vertical":     [1, 0, 1, 1, 1, 1],
-    "pitch_jitter": [1, 1, 0, 1, 1, 1],
-    "tempo":        [1, 1, 1, 0, 1, 1],
-    "timing":       [1, 1, 1, 1, 0, 1],
-    "jitter":       [1, 1, 1, 1, 1, 0],
+    "positive": [1, 1, 1, 1],
+    "key":      [0, 1, 1, 1],
+    "vertical": [1, 0, 1, 1],
+    "tempo":    [1, 1, 0, 1],
+    "timing":   [1, 1, 1, 0],
 }
 
 
@@ -138,6 +154,20 @@ def corrupt_polyrhythm(pm, bpm, rng):
 # (used when rendering EVERYTHING from MIDI, so all 5 axes share one domain
 #  with no audio-processing artefacts that could leak the label)
 # =========================================================================
+def circular_shift(pm, offset, L):
+    """Roll every onset by `offset`, tiling with period L so the loop stays full (no
+    leading/trailing silence). Used for PHASE AUGMENTATION: applying a random shared
+    offset to both loops of a pair randomises absolute onset position, so the model
+    can't cheat off 'when does B start' -- only the RELATIVE A-vs-B phase (the real
+    timing signal) survives."""
+    for inst in pm.instruments:
+        new = []
+        for n in inst.notes:
+            _emit_tiled(new, n.pitch, n.velocity, n.start + offset, min(n.end - n.start, L), L, L)
+        inst.notes = new
+    return pm
+
+
 def corrupt_key_midi(pm, rng):
     """Transpose every pitched note by +/-1 semitone -> key clash.
     notes_changed = 0 means the stem has no pitched content (e.g. drums) -> skip."""
@@ -152,32 +182,53 @@ def corrupt_key_midi(pm, rng):
     return pm, {"axis": "key", "semitones": int(steps), "notes_changed": changed}
 
 
-def corrupt_tempo_midi(pm, rng):
-    """Scale all note times by +/-10-20% -> tempo mismatch.
-    factor < 1 compresses (faster), factor > 1 stretches (slower)."""
+def corrupt_tempo_midi(pm, bpm, rng, beats_per_slice=8):
+    """Play the loop at a different tempo (+/-10-20%). The loop's cycle period becomes
+    factor*L, and we TILE it to fill the window so a faster loop simply cycles more times
+    -- NOT leaving trailing silence (which would be a single-loop shortcut). factor < 1
+    faster, factor > 1 slower."""
+    beat = 60.0 / bpm
+    L = beat * beats_per_slice
     pct = rng.uniform(0.10, 0.20)
     factor = 1.0 - pct if rng.random() < 0.5 else 1.0 + pct
+    period = factor * L                       # the retimed loop repeats every factor*L
     changed = 0
     for inst in pm.instruments:
+        new = []
         for n in inst.notes:
-            n.start *= factor
-            n.end *= factor
+            _emit_tiled(new, n.pitch, n.velocity, n.start * factor,
+                        min((n.end - n.start) * factor, L), L, period)
             changed += 1
+        inst.notes = new
     return pm, {"axis": "tempo", "factor": round(factor, 3), "notes_changed": changed}
 
 
-def corrupt_timing_midi(pm, bpm, rng):
-    """Delay every onset by a NON-metric fraction of a beat (~30-70%)."""
+def corrupt_timing_midi(pm, bpm, rng, jitter_frac=0.15, beats_per_slice=8):
+    """HYBRID phase clash via a CIRCULAR (wrap-around) shift: move every onset by a
+    constant 0.3-0.7 beat offset + a small per-note nudge, then wrap modulo the loop
+    length so notes pushed past the end reappear at the front.
+
+    Why wrap-around: a plain delay leaves LEADING SILENCE at the start of the loop, which
+    the model can detect from loop B ALONE ("does B start late?") -- a shortcut that has
+    nothing to do with A-vs-B alignment. Wrapping keeps the loop full from t=0, so the
+    ONLY way to detect the clash is to genuinely compare the two loops' onset patterns.
+    (A circular shift is also what phase-shifting a *loop* actually means.)"""
     beat = 60.0 / bpm
-    frac = rng.uniform(0.3, 0.7)
-    off = frac * beat
+    L = beat * beats_per_slice                         # the 2-bar (8-beat) slice length
+    off = rng.uniform(0.3, 0.7) * beat
     changed = 0
     for inst in pm.instruments:
+        new = []
         for n in inst.notes:
-            n.start += off
-            n.end += off
+            nudge = rng.uniform(-jitter_frac, jitter_frac) * beat
+            dur = min(n.end - n.start, L)
+            # TILE with period L (a loop repeats every L) so the wrap fills the front:
+            # notes from the previous cycle populate [0, off] -> no leading silence.
+            _emit_tiled(new, n.pitch, n.velocity, n.start + off + nudge, dur, L, L)
             changed += 1
-    return pm, {"axis": "timing", "offset_beats": round(frac, 3), "notes_changed": changed}
+        inst.notes = new
+    return pm, {"axis": "timing", "offset_beats": round(off / beat, 3),
+                "jitter_beat": jitter_frac, "wrap": True, "notes_changed": changed}
 
 
 def corrupt_jitter_midi(pm, bpm, rng, max_frac=0.2):
@@ -211,14 +262,26 @@ def corrupt_pitch_jitter_midi(pm, rng):
 
 
 def corrupt_vertical(pm_melody, pm_ref, rng):
-    """Move each melody note to a TRITONE (max Circle-of-Fifths distance) above the
-    reference note (bass / other loop) sounding at the same moment -> guaranteed
-    moment-to-moment harmonic clash. RELATIONAL: needs the partner loop `pm_ref`.
-    Corrupts pm_melody in place."""
+    """Move each melody note to the most DISSONANT interval against the concurrent
+    reference (bass) note -- but ONLY to pitch classes already present in the pair, so
+    the loop STAYS IN KEY. This is what separates `vertical` from `key`: key changes the
+    scale (out of key); vertical keeps the scale, breaks only the moment-to-moment
+    interval. RELATIONAL: needs the partner loop `pm_ref`. Corrupts pm_melody in place."""
     ref = [(n.start, n.end, n.pitch) for inst in pm_ref.instruments
            if not inst.is_drum for n in inst.notes]
     if not ref:
         return pm_melody, {"axis": "vertical", "notes_changed": 0}
+
+    # the shared scale = pitch classes actually used in either loop (their key material)
+    scale = {n.pitch % 12 for inst in pm_ref.instruments if not inst.is_drum for n in inst.notes}
+    scale |= {n.pitch % 12 for inst in pm_melody.instruments if not inst.is_drum for n in inst.notes}
+    if not scale:
+        return pm_melody, {"axis": "vertical", "notes_changed": 0}
+
+    def dissonance(pc, r):
+        ic = abs(pc - r) % 12
+        ic = min(ic, 12 - ic)                 # interval class 0..6
+        return {1: 3, 6: 2, 2: 1}.get(ic, 0)  # m2/M7 worst, then tritone, then M2/m7
 
     changed = 0
     for inst in pm_melody.instruments:
@@ -228,14 +291,15 @@ def corrupt_vertical(pm_melody, pm_ref, rng):
             r = next((rp for (rs, re, rp) in ref if rs <= n.start < re), None)
             if r is None:
                 r = min(ref, key=lambda x: abs(x[0] - n.start))[2]
-            target_pc = (r + 6) % 12                      # tritone from ref = max dissonance
-            new = n.pitch + ((target_pc - n.pitch) % 12)  # nearest pitch with that class
+            # pick the IN-SCALE pitch class that clashes hardest with the bass note
+            target_pc = max(scale, key=lambda pc: dissonance(pc, r))
+            new = n.pitch + ((target_pc - n.pitch) % 12)      # nearest pitch of that class
             if new - n.pitch > 6:
                 new -= 12
             if new != n.pitch:
                 n.pitch = int(np.clip(new, 0, 127))
                 changed += 1
-    return pm_melody, {"axis": "vertical", "notes_changed": changed}
+    return pm_melody, {"axis": "vertical", "notes_changed": changed, "in_scale": True}
 
 
 # =========================================================================
@@ -243,15 +307,14 @@ def corrupt_vertical(pm_melody, pm_ref, rng):
 # =========================================================================
 # B-only MIDI corruptions (edit loop B's notes, then RENDER).
 MIDI_CORRUPTIONS = {
-    "key":          corrupt_key_midi,          # (pm, rng)
-    "pitch_jitter": corrupt_pitch_jitter_midi, # (pm, rng)
-    "tempo":        corrupt_tempo_midi,         # (pm, rng)
-    "timing":       corrupt_timing_midi,        # (pm, bpm, rng)
-    "jitter":       corrupt_jitter_midi,        # (pm, bpm, rng)
+    "key":    corrupt_key_midi,     # (pm, rng)
+    "tempo":  corrupt_tempo_midi,   # (pm, bpm, rng)
+    "timing": corrupt_timing_midi,  # (pm, bpm, rng)
 }
 # `vertical` is RELATIONAL (needs the partner loop) -> handled separately, not here.
+# (pitch_jitter / jitter dropped: single-loop "quality", not pair compatibility.)
 
-NEEDS_BPM = {"timing", "jitter"}
+NEEDS_BPM = {"timing", "tempo"}   # both need the loop length (from bpm) to tile the window
 
 # Audio-domain versions kept for reference / augmentation (not used in the MIDI pipeline)
 AUDIO_CORRUPTIONS = {

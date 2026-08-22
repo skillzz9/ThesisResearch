@@ -58,8 +58,8 @@ MEL_MEL_COUNT = 4
 # Instrument-class -> category (allow-list; anything not listed and not drum/bass is dropped)
 MELODY_CLASSES = {
     "Guitar", "Piano", "Strings", "Strings (continued)", "Brass", "Organ",
-    "Synth Pad", "Synth Lead", "Pipe", "Reed", "Chromatic Percussion", "Ethnic",
-}
+    "Synth Lead", "Pipe", "Reed", "Chromatic Percussion", "Ethnic",
+}   # "Synth Pad" removed -- a pad is a harmonic bed, never a melodic line
 EXCLUDE_CLASSES = {"Sound Effects", "Sound effects"}
 
 
@@ -143,8 +143,10 @@ def richest_measure_in_region(active_count, num_measures, region):
 # ---------------------------------------------------------------------------
 def make_combos(active_stems, info, rng, melodic=None):
     """Generate the stem-combos from the stems active at an anchor.
-    `melodic` = set of MONOPHONIC (single-line) stems. Melody-melody pairs must
-    include at least one melodic stem so we avoid muddy chord-on-chord pairings."""
+    MONOPHONIC-ONLY: `melodic` = set of single-line stems. We pair ONLY monophonic
+    lines (cleanest signal for the axes) -- bass_main needs a monophonic melody, and
+    mel_mel needs BOTH stems monophonic. NO fallback to chordal stems; chord textures
+    are deferred to a later 'hard mode' once the concept is proven."""
     melodic = melodic or set()
     by_cat = {"Bass": [], "Melody": []}
     for s in active_stems:
@@ -152,21 +154,27 @@ def make_combos(active_stems, info, rng, melodic=None):
 
     loud = lambda lst: max(lst, key=lambda s: info[s]["loudness"]) if lst else None
     bass = loud(by_cat["Bass"])
-    mels = by_cat["Melody"]
-    mel_lines = [s for s in mels if s in melodic]
-    main = loud(mel_lines) if mel_lines else loud(mels)   # prefer a monophonic main line
+    mel_lines = [s for s in by_cat["Melody"] if s in melodic]   # monophonic melodies only
+    main = loud(mel_lines)                                       # no chordal fallback
 
     combos = []
     if bass and main:
         combos.append(("bass_main", bass, main))
 
-    # melody-melody: require >=1 monophonic stem (no chord-on-chord); fall back if none
-    mel_pairs = [p for p in combinations(sorted(mels), 2) if p[0] in melodic or p[1] in melodic]
-    if not mel_pairs:
-        mel_pairs = list(combinations(sorted(mels), 2))
-    if mel_pairs:
-        for a, b in rng.sample(mel_pairs, min(MEL_MEL_COUNT, len(mel_pairs))):
-            combos.append(("mel_mel", a, b))
+    # melody-melody, COVERAGE-FIRST: pair distinct lines disjointly (each used once);
+    # only reuse a melody when one would otherwise be left unpaired.
+    mels = sorted(mel_lines)
+    rng.shuffle(mels)
+    i = 0
+    while i + 1 < len(mels) and len(combos) - (1 if bass and main else 0) < MEL_MEL_COUNT:
+        a, b = sorted((mels[i], mels[i + 1]))
+        combos.append(("mel_mel", a, b))
+        i += 2
+    # odd leftover (>=3 melodies): pair it by reusing an already-used one
+    n_mm = sum(1 for c in combos if c[0] == "mel_mel")
+    if i < len(mels) and len(mels) >= 3 and n_mm < MEL_MEL_COUNT:
+        a, b = sorted((mels[i], mels[0]))
+        combos.append(("mel_mel", a, b))
     return combos
 
 

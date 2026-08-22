@@ -54,7 +54,7 @@ def demo_pair(track_dir, anchor, cp, bpm, measure_dur, rng):
     sf.write(f"{outdir}/positive.wav", mix(yA, yB), SR)
 
     made = ["positive"]
-    for axis in ["key", "vertical", "pitch_jitter", "tempo", "timing", "jitter"]:
+    for axis in ["key", "vertical", "tempo", "timing"]:
         if axis == "vertical":
             # reference = lower-pitched stem (foundation); corrupt the higher one
             a_low = BD.mean_pitch(pmA) <= BD.mean_pitch(pmB)

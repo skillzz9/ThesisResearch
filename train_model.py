@@ -1,28 +1,25 @@
 """
 train_model.py
 --------------
-Two-tier per-axis compatibility model.
+Four-gate relational compatibility model (simplified scope).
 
-  TIER 1 (foundational gates, binary, BCE):
-        harmony: key, vertical, pitch_jitter
-        rhythm : tempo, timing, jitter
-  TIER 2 (quality of match, continuous [0,1], regression/MSE):
-        register  (frequency-band masking; 1=muddy/masked, 0=clean separation)
+  HARMONY (global path):  key, vertical
+  RHYTHM  (temporal path): tempo, timing
 
-Both tiers share ONE encoder and train jointly in a single backward pass
-(multi-task): loss = BCE(gates) + LAMBDA_REG * MSE(quality).
+Binary classification only — one BCE loss over the 4 gates. (The register regression
+head is deferred to Phase 2, isolated; the quality axes pitch_jitter/jitter were dropped.)
 
   * 80/20 train/val split BY TRACK (no leakage)
-  * reports Tier-1 clash-recall AND Tier-2 register MAE, SEEN vs UNSEEN
-  * cosine LR decay + save-best (on mean unseen clash-recall) -> no noisy last-epoch snapshot
+  * pos_weight computed from the data (counters the compatible/clash imbalance)
+  * reports per-axis clash-recall, SEEN vs UNSEEN, every epoch
+  * cosine LR decay + save-best (on mean unseen clash-recall)
 
-Run:  ./.venv/bin/python train_model.py --epochs 60
+Run:  ./.venv/bin/python train_model.py --epochs 40
 """
 
 import os
 import argparse
 import random
-import math
 
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
@@ -33,10 +30,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-AXES = ["key", "vertical", "pitch_jitter", "tempo", "timing", "jitter"]   # Tier-1 binary gates
-QUALITY = ["register"]                                                    # Tier-2 continuous
+AXES = ["key", "vertical", "tempo", "timing"]   # 2 harmony + 2 rhythm
 TARGET_T = 350
-LAMBDA_REG = 10.0        # weight on the Tier-2 MSE so it matters next to the 6 BCE gates
 
 
 # ------------------------------------------------------------------ split
@@ -75,8 +70,7 @@ class PairDataset(Dataset):
         a = load_img(r["file_A"])
         b = load_img(r["file_B"])
         y = torch.tensor([float(r[ax]) for ax in AXES], dtype=torch.float32)
-        yq = torch.tensor([float(r[q]) for q in QUALITY], dtype=torch.float32)
-        return a, b, y, yq
+        return a, b, y
 
 
 # ------------------------------------------------------------------ model
@@ -108,67 +102,49 @@ class CompatModel(nn.Module):
     def __init__(self, C=128):
         super().__init__()
         self.enc = Encoder(C=C)
-        # --- global path -> harmony gates (key, vertical, pitch_jitter) ---
+        # global path -> harmony gates: key, vertical
         self.gmlp = nn.Sequential(nn.Linear(3 * C, 256), nn.ReLU(), nn.Dropout(0.3),
                                   nn.Linear(256, 128), nn.ReLU())
-        self.harm = nn.Linear(128, 3)
-        # --- temporal path -> rhythm gates (tempo, timing, jitter) ---
+        self.harm = nn.Linear(128, 2)
+        # temporal path -> rhythm gates: tempo, timing
         self.tstream = nn.Sequential(nn.Conv1d(C, 128, 5, padding=2), nn.BatchNorm1d(128), nn.ReLU(),
                                      nn.Conv1d(128, 128, 5, padding=2), nn.BatchNorm1d(128), nn.ReLU())
         self.tconv = nn.Sequential(nn.Conv1d(3 * 128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU(),
                                    nn.Conv1d(128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU())
-        self.rhy = nn.Linear(128 * 3, 3)
-        # --- TIER 2: quality regression (register) off the global summary ---
-        self.qhead = nn.Sequential(nn.Linear(3 * C, 128), nn.ReLU(), nn.Dropout(0.3),
-                                   nn.Linear(128, len(QUALITY)))
+        self.rhy = nn.Linear(128 * 3, 2)
 
     def forward(self, a, b):
         ga, sa = self.enc(a)
         gb, sb = self.enc(b)
-        g = sym(ga, gb)
-        h = self.harm(self.gmlp(g))                     # [B,3] harmony logits
+        h = self.harm(self.gmlp(sym(ga, gb)))           # [B,2] harmony logits
         ta, tb = self.tstream(sa), self.tstream(sb)
         tc = self.tconv(sym(ta, tb))
         pooled = torch.cat([tc.mean(dim=2), tc.std(dim=2), tc.amax(dim=2)], dim=1)
-        r = self.rhy(pooled)                            # [B,3] rhythm logits
-        q = self.qhead(g)                               # [B,1] register logit (Tier-2)
-        return torch.cat([h, r], dim=1), q              # (gates [B,6], quality [B,1])
+        r = self.rhy(pooled)                            # [B,2] rhythm logits
+        return torch.cat([h, r], dim=1)                 # [B,4] logits, order = AXES
 
 
 # ------------------------------------------------------------------ eval
 def evaluate(model, loader, device):
     model.eval()
     clash = {ax: [0, 0] for ax in AXES}    # per-axis clash-recall [correct, total] on label==0
-    reg_abs, reg_n = 0.0, 0                # Tier-2 register MAE
     with torch.no_grad():
-        for a, b, y, yq in loader:
-            gates, q = model(a.to(device), b.to(device))
-            pred = (torch.sigmoid(gates).cpu() > 0.5).float()
+        for a, b, y in loader:
+            pred = (torch.sigmoid(model(a.to(device), b.to(device))).cpu() > 0.5).float()
             for j, ax in enumerate(AXES):
                 yj, pj = y[:, j], pred[:, j]
                 neg = yj == 0
                 clash[ax][0] += ((pj == yj) & neg).sum().item(); clash[ax][1] += int(neg.sum())
-            qp = torch.sigmoid(q).cpu()
-            reg_abs += (qp - yq).abs().sum().item(); reg_n += yq.numel()
-    rec = {ax: clash[ax][0] / max(1, clash[ax][1]) for ax in AXES}
-    mae = reg_abs / max(1, reg_n)
-    return rec, mae
+    return {ax: clash[ax][0] / max(1, clash[ax][1]) for ax in AXES}
 
 
 # ------------------------------------------------------------------ train
-def train(manifest="dataset.csv", epochs=60, batch=32, lr=3e-4):
+def train(manifest="dataset.csv", epochs=40, batch=32, lr=3e-4):
     device = torch.device("cuda" if torch.cuda.is_available()
                           else "mps" if torch.backends.mps.is_available() else "cpu")
     train_df, val_df, val_tracks = split_by_track(manifest)
     print(f"Device: {device.type} | train pairs: {len(train_df)} | val pairs: {len(val_df)} "
           f"| val tracks: {val_tracks}")
-
-    # trivial baseline: always predict the TRAIN mean register -> the MAE the model must beat
-    reg_mean = float(train_df["register"].mean())
-    base_seen = float((train_df["register"] - reg_mean).abs().mean())
-    base_unseen = float((val_df["register"] - reg_mean).abs().mean())
-    print(f"T2 register baseline (predict-mean {reg_mean:.3f}) MAE: "
-          f"SEEN {base_seen:.3f}  UNSEEN {base_unseen:.3f}  <- model must beat these")
 
     tl = DataLoader(PairDataset(train_df), batch_size=batch, shuffle=True, num_workers=2)
     vl = DataLoader(PairDataset(val_df), batch_size=batch, shuffle=False, num_workers=2)
@@ -176,50 +152,47 @@ def train(manifest="dataset.csv", epochs=60, batch=32, lr=3e-4):
     model = CompatModel().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    # clash (label 0) is ~12.5% of the gate data -> down-weight the majority "compatible" term
-    pos_weight = torch.full((6,), 117.0 / 819.0, device=device)
-    bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    mse = nn.MSELoss()
+    # BCE pos_weight scales the label==1 ("compatible", majority) term. Set it to
+    # clash/compatible (<1) so the rare clash class gets relatively more gradient.
+    pw = [max(1, int((train_df[ax] == 0).sum())) / max(1, int((train_df[ax] == 1).sum())) for ax in AXES]
+    pos_weight = torch.tensor(pw, dtype=torch.float32, device=device)
+    print("pos_weight per axis:", {ax: round(w, 3) for ax, w in zip(AXES, pw)})
+    crit = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     best_score, best_state = -1.0, None
     for ep in range(1, epochs + 1):
         model.train()
         tot = 0.0
-        for a, b, y, yq in tl:
-            a, b, y, yq = a.to(device), b.to(device), y.to(device), yq.to(device)
+        for a, b, y in tl:
+            a, b, y = a.to(device), b.to(device), y.to(device)
             opt.zero_grad()
-            gates, q = model(a, b)
-            loss = bce(gates, y) + LAMBDA_REG * mse(torch.sigmoid(q), yq)
+            loss = crit(model(a, b), y)
             loss.backward()
             opt.step()
             tot += loss.item()
         sched.step()
 
-        tr_rec, tr_mae = evaluate(model, tl, device)          # SEEN
-        va_rec, va_mae = evaluate(model, vl, device)          # UNSEEN
-        tr = " ".join(f"{ax[:4]}={tr_rec[ax]:.2f}" for ax in AXES)
-        va = " ".join(f"{ax[:4]}={va_rec[ax]:.2f}" for ax in AXES)
-        mean_unseen = float(np.mean([va_rec[ax] for ax in AXES]))
+        tr = evaluate(model, tl, device)       # SEEN
+        va = evaluate(model, vl, device)       # UNSEEN
+        mean_unseen = float(np.mean([va[ax] for ax in AXES]))
+        seen = " ".join(f"{ax[:4]}={tr[ax]:.2f}" for ax in AXES)
+        unseen = " ".join(f"{ax[:4]}={va[ax]:.2f}" for ax in AXES)
         print(f"epoch {ep}/{epochs}  loss={tot/len(tl):.4f}  lr={sched.get_last_lr()[0]:.2e}")
-        print(f"   T1 clash-recall SEEN : {tr}")
-        print(f"   T1 clash-recall UNSEEN: {va}   (mean {mean_unseen:.2f})")
-        print(f"   T2 register MAE      : SEEN {tr_mae:.3f}  UNSEEN {va_mae:.3f}   "
-              f"(baseline {base_unseen:.3f}; lower=better)")
+        print(f"   clash-recall SEEN  : {seen}")
+        print(f"   clash-recall UNSEEN: {unseen}   (mean {mean_unseen:.2f})")
 
-        # save-best on mean unseen clash-recall (penalise register error a little)
-        score = mean_unseen - va_mae
-        if score > best_score:
-            best_score, best_state = score, {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        if mean_unseen > best_score:
+            best_score, best_state = mean_unseen, {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
     os.makedirs("models", exist_ok=True)
     torch.save(best_state or model.state_dict(), "models/compat_model.pth")
-    print(f"saved BEST -> models/compat_model.pth  (score={best_score:.3f})")
+    print(f"saved BEST -> models/compat_model.pth  (mean unseen clash-recall={best_score:.3f})")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", default="dataset.csv")
-    ap.add_argument("--epochs", type=int, default=60)
+    ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=3e-4)
     a = ap.parse_args()
