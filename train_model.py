@@ -87,10 +87,10 @@ class Encoder(nn.Module):
         self.net = nn.Sequential(blk(cin, 32), blk(32, 64), blk(64, C), blk(C, C))
 
     def forward(self, x):            # x [B,3,84,T]
-        f = self.net(x)              # [B,C,~5,T]
-        f = f.mean(dim=2)            # pool remaining frequency -> [B,C,T]
-        g = f.mean(dim=2)            # global (pool time) -> [B,C]
-        return g, f
+        f2d = self.net(x)            # [B,C,~5,T]  -- keep the coarse frequency axis
+        seq = f2d.mean(dim=2)        # pool frequency -> [B,C,T]  (rhythm + global)
+        g = seq.mean(dim=2)          # pool time -> [B,C]  (global summary, for key)
+        return g, seq, f2d
 
 
 def sym(a, b):
@@ -102,11 +102,17 @@ class CompatModel(nn.Module):
     def __init__(self, C=128):
         super().__init__()
         self.enc = Encoder(C=C)
-        # global path -> harmony gates: key, vertical
+        # KEY -> global summary (a global / time-invariant property: whole-loop key)
         self.gmlp = nn.Sequential(nn.Linear(3 * C, 256), nn.ReLU(), nn.Dropout(0.3),
                                   nn.Linear(256, 128), nn.ReLU())
-        self.harm = nn.Linear(128, 2)
-        # temporal path -> rhythm gates: tempo, timing
+        self.key_head = nn.Linear(128, 1)
+        # CONSONANCE -> freq-preserving, TIME-ALIGNED A-vs-B comparison. Compares the two
+        # loops frame-by-frame WITH the coarse frequency axis intact, so it can see the
+        # per-moment vertical intervals (which the time-averaged summary throws away).
+        self.cconv = nn.Sequential(nn.Conv2d(3 * C, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU())
+        self.cseq = nn.Sequential(nn.Conv1d(64, 64, 3, padding=1), nn.BatchNorm1d(64), nn.ReLU())
+        self.cons_head = nn.Linear(64 * 3, 1)
+        # RHYTHM -> temporal path: tempo, timing
         self.tstream = nn.Sequential(nn.Conv1d(C, 128, 5, padding=2), nn.BatchNorm1d(128), nn.ReLU(),
                                      nn.Conv1d(128, 128, 5, padding=2), nn.BatchNorm1d(128), nn.ReLU())
         self.tconv = nn.Sequential(nn.Conv1d(3 * 128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU(),
@@ -114,28 +120,57 @@ class CompatModel(nn.Module):
         self.rhy = nn.Linear(128 * 3, 2)
 
     def forward(self, a, b):
-        ga, sa = self.enc(a)
-        gb, sb = self.enc(b)
-        h = self.harm(self.gmlp(sym(ga, gb)))           # [B,2] harmony logits
+        ga, sa, fa = self.enc(a)
+        gb, sb, fb = self.enc(b)
+        # key -- global summary
+        key = self.key_head(self.gmlp(sym(ga, gb)))                 # [B,1]
+        # consonance -- per-frame freq-preserving comparison, then pool over time
+        cc = self.cconv(sym(fa, fb)).mean(dim=2)                    # [B,64,T]  (pool freq)
+        cc = self.cseq(cc)                                          # [B,64,T]
+        cpool = torch.cat([cc.mean(dim=2), cc.std(dim=2), cc.amax(dim=2)], dim=1)  # [B,192]
+        cons = self.cons_head(cpool)                                # [B,1]
+        # rhythm -- temporal path
         ta, tb = self.tstream(sa), self.tstream(sb)
         tc = self.tconv(sym(ta, tb))
-        pooled = torch.cat([tc.mean(dim=2), tc.std(dim=2), tc.amax(dim=2)], dim=1)
-        r = self.rhy(pooled)                            # [B,2] rhythm logits
-        return torch.cat([h, r], dim=1)                 # [B,4] logits, order = AXES
+        rpool = torch.cat([tc.mean(dim=2), tc.std(dim=2), tc.amax(dim=2)], dim=1)
+        r = self.rhy(rpool)                                         # [B,2]
+        return torch.cat([key, cons, r], dim=1)                     # [B,4]: key, consonance, tempo, timing
 
 
 # ------------------------------------------------------------------ eval
+def _auc(scores, labels):
+    """Threshold-free separation: P(a compatible pair scores higher than a clash pair).
+    0.5 = no signal (coin flip), 1.0 = perfect separation. Rank-based (Mann-Whitney);
+    unlike thresholded recall it does NOT flip 0<->1 on tiny sets."""
+    pos = scores[labels == 1]; neg = scores[labels == 0]
+    if len(pos) == 0 or len(neg) == 0:
+        return float("nan")
+    order = scores.argsort()
+    ranks = torch.empty_like(order, dtype=torch.float32)
+    ranks[order] = torch.arange(1, len(scores) + 1, dtype=torch.float32)
+    r_pos = ranks[labels == 1].sum()
+    return float((r_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
+
+
 def evaluate(model, loader, device):
+    """Returns (clash_recall, auc) dicts per axis. AUC is the trustworthy metric on tiny
+    data (threshold-free); clash-recall is kept for continuity but bounces on small sets."""
     model.eval()
-    clash = {ax: [0, 0] for ax in AXES}    # per-axis clash-recall [correct, total] on label==0
+    clash = {ax: [0, 0] for ax in AXES}
+    P, Y = [], []
     with torch.no_grad():
         for a, b, y in loader:
-            pred = (torch.sigmoid(model(a.to(device), b.to(device))).cpu() > 0.5).float()
+            prob = torch.sigmoid(model(a.to(device), b.to(device))).cpu()
+            P.append(prob); Y.append(y)
+            pred = (prob > 0.5).float()
             for j, ax in enumerate(AXES):
                 yj, pj = y[:, j], pred[:, j]
                 neg = yj == 0
                 clash[ax][0] += ((pj == yj) & neg).sum().item(); clash[ax][1] += int(neg.sum())
-    return {ax: clash[ax][0] / max(1, clash[ax][1]) for ax in AXES}
+    P = torch.cat(P); Y = torch.cat(Y)
+    rec = {ax: clash[ax][0] / max(1, clash[ax][1]) for ax in AXES}
+    auc = {ax: _auc(P[:, j], Y[:, j]) for j, ax in enumerate(AXES)}
+    return rec, auc
 
 
 # ------------------------------------------------------------------ train
@@ -172,21 +207,24 @@ def train(manifest="dataset.csv", epochs=40, batch=32, lr=3e-4):
             tot += loss.item()
         sched.step()
 
-        tr = evaluate(model, tl, device)       # SEEN
-        va = evaluate(model, vl, device)       # UNSEEN
-        mean_unseen = float(np.mean([va[ax] for ax in AXES]))
-        seen = " ".join(f"{ax[:4]}={tr[ax]:.2f}" for ax in AXES)
-        unseen = " ".join(f"{ax[:4]}={va[ax]:.2f}" for ax in AXES)
+        tr_rec, tr_auc = evaluate(model, tl, device)       # SEEN
+        va_rec, va_auc = evaluate(model, vl, device)       # UNSEEN
+        mean_unseen_auc = float(np.nanmean([va_auc[ax] for ax in AXES]))
+        s_auc = " ".join(f"{ax[:4]}={tr_auc[ax]:.2f}" for ax in AXES)
+        u_auc = " ".join(f"{ax[:4]}={va_auc[ax]:.2f}" for ax in AXES)
+        u_rec = " ".join(f"{ax[:4]}={va_rec[ax]:.2f}" for ax in AXES)
         print(f"epoch {ep}/{epochs}  loss={tot/len(tl):.4f}  lr={sched.get_last_lr()[0]:.2e}")
-        print(f"   clash-recall SEEN  : {seen}")
-        print(f"   clash-recall UNSEEN: {unseen}   (mean {mean_unseen:.2f})")
+        print(f"   AUC  SEEN  : {s_auc}   (0.5=no signal, 1.0=perfect)")
+        print(f"   AUC  UNSEEN: {u_auc}   (mean {mean_unseen_auc:.2f})")
+        print(f"   recall UNSEEN: {u_rec}   (thresholded — noisy)")
 
-        if mean_unseen > best_score:
-            best_score, best_state = mean_unseen, {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        # select best on UNSEEN AUC (threshold-free -> stable, unlike recall)
+        if mean_unseen_auc > best_score:
+            best_score, best_state = mean_unseen_auc, {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
     os.makedirs("models", exist_ok=True)
     torch.save(best_state or model.state_dict(), "models/compat_model.pth")
-    print(f"saved BEST -> models/compat_model.pth  (mean unseen clash-recall={best_score:.3f})")
+    print(f"saved BEST -> models/compat_model.pth  (mean unseen AUC={best_score:.3f})")
 
 
 if __name__ == "__main__":
