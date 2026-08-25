@@ -117,7 +117,11 @@ class CompatModel(nn.Module):
                                      nn.Conv1d(128, 128, 5, padding=2), nn.BatchNorm1d(128), nn.ReLU())
         self.tconv = nn.Sequential(nn.Conv1d(3 * 128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU(),
                                    nn.Conv1d(128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU())
-        self.rhy = nn.Linear(128 * 3, 2)
+        # order-preserving reader: a GRU tracks the drift SHAPE over time (tempo needs
+        # this; mean/std/max pooling alone destroys it). Concatenated with the pooling so
+        # timing keeps its working summary-stat signal.
+        self.rhy_gru = nn.GRU(128, 64, batch_first=True, bidirectional=True)
+        self.rhy = nn.Linear(128 * 3 + 128, 2)
 
     def forward(self, a, b):
         ga, sa, fa = self.enc(a)
@@ -131,9 +135,11 @@ class CompatModel(nn.Module):
         cons = self.cons_head(cpool)                                # [B,1]
         # rhythm -- temporal path
         ta, tb = self.tstream(sa), self.tstream(sb)
-        tc = self.tconv(sym(ta, tb))
-        rpool = torch.cat([tc.mean(dim=2), tc.std(dim=2), tc.amax(dim=2)], dim=1)
-        r = self.rhy(rpool)                                         # [B,2]
+        tc = self.tconv(sym(ta, tb))                               # [B,128,T]
+        rpool = torch.cat([tc.mean(dim=2), tc.std(dim=2), tc.amax(dim=2)], dim=1)  # [B,384]
+        _, h = self.rhy_gru(tc.transpose(1, 2))                    # h: [2,B,64] bidir GRU over time
+        rseq = torch.cat([h[0], h[1]], dim=1)                      # [B,128] drift-shape summary
+        r = self.rhy(torch.cat([rpool, rseq], dim=1))              # [B,2]
         return torch.cat([key, cons, r], dim=1)                     # [B,4]: key, consonance, tempo, timing
 
 
@@ -170,7 +176,15 @@ def evaluate(model, loader, device):
     P = torch.cat(P); Y = torch.cat(Y)
     rec = {ax: clash[ax][0] / max(1, clash[ax][1]) for ax in AXES}
     auc = {ax: _auc(P[:, j], Y[:, j]) for j, ax in enumerate(AXES)}
-    return rec, auc
+    # balanced accuracy at 0.5: mean of clash-recall and compatible-recall -> fair under
+    # class imbalance (plain accuracy is dominated by the 80% "compatible" majority)
+    acc = {}
+    for j, ax in enumerate(AXES):
+        pred = (P[:, j] > 0.5).float(); y = Y[:, j]
+        rc = ((pred == y) & (y == 0)).sum().item() / max(1, int((y == 0).sum()))
+        rk = ((pred == y) & (y == 1)).sum().item() / max(1, int((y == 1).sum()))
+        acc[ax] = 0.5 * (rc + rk)
+    return rec, auc, acc
 
 
 # ------------------------------------------------------------------ train
@@ -207,16 +221,16 @@ def train(manifest="dataset.csv", epochs=40, batch=32, lr=3e-4):
             tot += loss.item()
         sched.step()
 
-        tr_rec, tr_auc = evaluate(model, tl, device)       # SEEN
-        va_rec, va_auc = evaluate(model, vl, device)       # UNSEEN
+        tr_rec, tr_auc, tr_acc = evaluate(model, tl, device)       # SEEN
+        va_rec, va_auc, va_acc = evaluate(model, vl, device)       # UNSEEN
         mean_unseen_auc = float(np.nanmean([va_auc[ax] for ax in AXES]))
         s_auc = " ".join(f"{ax[:4]}={tr_auc[ax]:.2f}" for ax in AXES)
         u_auc = " ".join(f"{ax[:4]}={va_auc[ax]:.2f}" for ax in AXES)
-        u_rec = " ".join(f"{ax[:4]}={va_rec[ax]:.2f}" for ax in AXES)
+        u_acc = " ".join(f"{ax[:4]}={va_acc[ax]:.2f}" for ax in AXES)
         print(f"epoch {ep}/{epochs}  loss={tot/len(tl):.4f}  lr={sched.get_last_lr()[0]:.2e}")
-        print(f"   AUC  SEEN  : {s_auc}   (0.5=no signal, 1.0=perfect)")
-        print(f"   AUC  UNSEEN: {u_auc}   (mean {mean_unseen_auc:.2f})")
-        print(f"   recall UNSEEN: {u_rec}   (thresholded — noisy)")
+        print(f"   AUC      SEEN  : {s_auc}   (0.5=chance, 1.0=perfect)")
+        print(f"   AUC      UNSEEN: {u_auc}   (mean {mean_unseen_auc:.2f})")
+        print(f"   bal-acc  UNSEEN: {u_acc}   (0.5=chance; balanced accuracy)")
 
         # select best on UNSEEN AUC (threshold-free -> stable, unlike recall)
         if mean_unseen_auc > best_score:
