@@ -59,16 +59,42 @@ def load_img(path):
 
 
 class PairDataset(Dataset):
-    def __init__(self, df):
+    def __init__(self, df, train=False, crop_t=256):
         self.df = df.reset_index(drop=True)
+        self.train = train          # train mode -> random crop + SpecAugment
+        self.crop_t = crop_t
 
     def __len__(self):
         return len(self.df)
+
+    @staticmethod
+    def _specaug(t):
+        """Light SpecAugment: one random frequency mask + one random time mask.
+        Makes every epoch's view of a pair different -> fights image memorisation."""
+        t = t.clone()
+        if random.random() < 0.5:
+            f0 = random.randint(0, t.shape[1] - 9)
+            t[:, f0:f0 + random.randint(2, 8), :] = 0.0
+        if random.random() < 0.5:
+            T = t.shape[2]
+            t0 = random.randint(0, max(0, T - 17))
+            t[:, :, t0:t0 + random.randint(4, 16)] = 0.0
+        return t
 
     def __getitem__(self, i):
         r = self.df.iloc[i]
         a = load_img(r["file_A"])
         b = load_img(r["file_B"])
+        if self.train:
+            # SAME random time-crop for both loops -- preserves their relative
+            # alignment (a shared shift is label-preserving, like phase augmentation)
+            T = a.shape[2]
+            if T > self.crop_t:
+                s = random.randint(0, T - self.crop_t)
+                a = a[:, :, s:s + self.crop_t]
+                b = b[:, :, s:s + self.crop_t]
+            a = self._specaug(a)
+            b = self._specaug(b)
         y = torch.tensor([float(r[ax]) for ax in AXES], dtype=torch.float32)
         return a, b, y
 
@@ -158,33 +184,69 @@ def _auc(scores, labels):
     return float((r_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
 
 
-def evaluate(model, loader, device):
-    """Returns (clash_recall, auc) dicts per axis. AUC is the trustworthy metric on tiny
-    data (threshold-free); clash-recall is kept for continuity but bounces on small sets."""
+def recalibrate_bn(model, loader, device, n_batches=8):
+    """Refresh BatchNorm running statistics with a cumulative average over training data.
+    On tiny datasets BN's momentum-EMA stats drift, making eval-mode behave unlike
+    train-mode (documented: key 0.67 train-mode vs 0.05 eval-mode). This fixes the stats
+    without touching optimisation (unlike the GroupNorm attempt, which hurt learning)."""
+    for m in model.modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+            m.reset_running_stats()
+            m.momentum = None            # None -> cumulative moving average
+    model.train()
+    with torch.no_grad():
+        for i, (a, b, _) in enumerate(loader):
+            model(a.to(device), b.to(device))
+            if i + 1 >= n_batches:
+                break
+    for m in model.modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+            m.momentum = 0.1
+
+
+def predict_probs(model, loader, device):
     model.eval()
-    clash = {ax: [0, 0] for ax in AXES}
     P, Y = [], []
     with torch.no_grad():
         for a, b, y in loader:
-            prob = torch.sigmoid(model(a.to(device), b.to(device))).cpu()
-            P.append(prob); Y.append(y)
-            pred = (prob > 0.5).float()
-            for j, ax in enumerate(AXES):
-                yj, pj = y[:, j], pred[:, j]
-                neg = yj == 0
-                clash[ax][0] += ((pj == yj) & neg).sum().item(); clash[ax][1] += int(neg.sum())
-    P = torch.cat(P); Y = torch.cat(Y)
-    rec = {ax: clash[ax][0] / max(1, clash[ax][1]) for ax in AXES}
-    auc = {ax: _auc(P[:, j], Y[:, j]) for j, ax in enumerate(AXES)}
-    # balanced accuracy at 0.5: mean of clash-recall and compatible-recall -> fair under
-    # class imbalance (plain accuracy is dominated by the 80% "compatible" majority)
-    acc = {}
+            P.append(torch.sigmoid(model(a.to(device), b.to(device))).cpu())
+            Y.append(y)
+    return torch.cat(P), torch.cat(Y)
+
+
+def best_thresholds(P, Y):
+    """Per-axis decision threshold maximising balanced accuracy -- chosen on TRAINING
+    data only, then applied unchanged to unseen data. Converts the model's separation
+    (AUC) into honest accuracy; without this, 0.5 sits arbitrarily vs the pos_weighted
+    output distribution and accuracy reads as chance even when separation exists."""
+    thr = {}
+    grid = np.linspace(0.05, 0.95, 37)
     for j, ax in enumerate(AXES):
-        pred = (P[:, j] > 0.5).float(); y = Y[:, j]
+        p, y = P[:, j], Y[:, j]
+        best_t, best_b = 0.5, -1.0
+        for t in grid:
+            pred = (p > t).float()
+            rc = ((pred == y) & (y == 0)).sum().item() / max(1, int((y == 0).sum()))
+            rk = ((pred == y) & (y == 1)).sum().item() / max(1, int((y == 1).sum()))
+            b = 0.5 * (rc + rk)
+            if b > best_b:
+                best_b, best_t = b, float(t)
+        thr[ax] = best_t
+    return thr
+
+
+def metrics(P, Y, thresholds=None):
+    """(auc, balanced-accuracy) dicts per axis; bal-acc uses calibrated thresholds."""
+    auc, bal = {}, {}
+    for j, ax in enumerate(AXES):
+        p, y = P[:, j], Y[:, j]
+        auc[ax] = _auc(p, y)
+        t = (thresholds or {}).get(ax, 0.5)
+        pred = (p > t).float()
         rc = ((pred == y) & (y == 0)).sum().item() / max(1, int((y == 0).sum()))
         rk = ((pred == y) & (y == 1)).sum().item() / max(1, int((y == 1).sum()))
-        acc[ax] = 0.5 * (rc + rk)
-    return rec, auc, acc
+        bal[ax] = 0.5 * (rc + rk)
+    return auc, bal
 
 
 # ------------------------------------------------------------------ train
@@ -195,8 +257,11 @@ def train(manifest="dataset.csv", epochs=40, batch=32, lr=3e-4):
     print(f"Device: {device.type} | train pairs: {len(train_df)} | val pairs: {len(val_df)} "
           f"| val tracks: {val_tracks}")
 
-    tl = DataLoader(PairDataset(train_df), batch_size=batch, shuffle=True, num_workers=2)
-    vl = DataLoader(PairDataset(val_df), batch_size=batch, shuffle=False, num_workers=2)
+    # train loader: augmented views (random shared crop + SpecAugment)
+    tl = DataLoader(PairDataset(train_df, train=True), batch_size=batch, shuffle=True, num_workers=4)
+    # clean loaders for BN recalibration + evaluation (full-length, no augmentation)
+    cl = DataLoader(PairDataset(train_df), batch_size=batch, shuffle=False, num_workers=4)
+    vl = DataLoader(PairDataset(val_df), batch_size=batch, shuffle=False, num_workers=4)
 
     model = CompatModel().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -221,20 +286,28 @@ def train(manifest="dataset.csv", epochs=40, batch=32, lr=3e-4):
             tot += loss.item()
         sched.step()
 
-        tr_rec, tr_auc, tr_acc = evaluate(model, tl, device)       # SEEN
-        va_rec, va_auc, va_acc = evaluate(model, vl, device)       # UNSEEN
-        mean_unseen_auc = float(np.nanmean([va_auc[ax] for ax in AXES]))
-        s_auc = " ".join(f"{ax[:4]}={tr_auc[ax]:.2f}" for ax in AXES)
-        u_auc = " ".join(f"{ax[:4]}={va_auc[ax]:.2f}" for ax in AXES)
-        u_acc = " ".join(f"{ax[:4]}={va_acc[ax]:.2f}" for ax in AXES)
-        print(f"epoch {ep}/{epochs}  loss={tot/len(tl):.4f}  lr={sched.get_last_lr()[0]:.2e}")
-        print(f"   AUC      SEEN  : {s_auc}   (0.5=chance, 1.0=perfect)")
-        print(f"   AUC      UNSEEN: {u_auc}   (mean {mean_unseen_auc:.2f})")
-        print(f"   bal-acc  UNSEEN: {u_acc}   (0.5=chance; balanced accuracy)")
+        if ep % 3 != 0 and ep != epochs:            # evaluate every 3rd epoch + final
+            print(f"epoch {ep}/{epochs}  loss={tot/len(tl):.4f}")
+            continue
 
-        # select best on UNSEEN AUC (threshold-free -> stable, unlike recall)
+        recalibrate_bn(model, cl, device)           # fix BN running stats before eval
+        Ptr, Ytr = predict_probs(model, cl, device)
+        Pva, Yva = predict_probs(model, vl, device)
+        thr = best_thresholds(Ptr, Ytr)             # thresholds from TRAIN only
+        tr_auc, tr_bal = metrics(Ptr, Ytr, thr)
+        va_auc, va_bal = metrics(Pva, Yva, thr)
+        mean_unseen_auc = float(np.nanmean([va_auc[ax] for ax in AXES]))
+        print(f"epoch {ep}/{epochs}  loss={tot/len(tl):.4f}  lr={sched.get_last_lr()[0]:.2e}")
+        print(f"   AUC     SEEN  : " + " ".join(f"{ax[:4]}={tr_auc[ax]:.2f}" for ax in AXES))
+        print(f"   AUC     UNSEEN: " + " ".join(f"{ax[:4]}={va_auc[ax]:.2f}" for ax in AXES)
+              + f"   (mean {mean_unseen_auc:.2f})")
+        print(f"   bal-acc SEEN  : " + " ".join(f"{ax[:4]}={tr_bal[ax]:.2f}" for ax in AXES))
+        print(f"   bal-acc UNSEEN: " + " ".join(f"{ax[:4]}={va_bal[ax]:.2f}" for ax in AXES)
+              + "   (calibrated thresholds)")
+
         if mean_unseen_auc > best_score:
-            best_score, best_state = mean_unseen_auc, {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            best_score = mean_unseen_auc
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
     os.makedirs("models", exist_ok=True)
     torch.save(best_state or model.state_dict(), "models/compat_model.pth")

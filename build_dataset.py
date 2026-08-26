@@ -44,7 +44,10 @@ OUT_DIR = os.environ.get("DATASET_OUT", "features")   # env-based so spawned wor
 MANIFEST = os.environ.get("DATASET_MANIFEST", "dataset.csv")
 SEED = 42
 N_TRACKS = None          # None = all; set to a small int to test quickly
-AUG_SHIFTS = [-2, -1, 1, 2]
+AUG_SHIFTS = [-5, -4, -3, -2, -1, 1, 2, 3, 4, 5]   # wider range -> better key invariance
+ANCHORS_PER_SONG = 6     # rich 2-bar anchors extracted per song (was 2) -> ~3x the pairs
+N_AUG = 2                # augmented positives per pair (different shared transpositions)
+N_NEG = 2                # negative variants per axis per pair (guaranteed different)
 MIN_FILL = 0.6           # a stem's MIDI must cover >=60% of the measure with notes to be
                          # paired (measured on the MIDI we render, not Slakh's reverb-filled
                          # audio) -> stops sparse/silent loops entering the dataset
@@ -178,12 +181,7 @@ def select_track(track_dir):
 
     active_count = [sum(1 for s in stem_ivs if active_at(stem_ivs[s], m)) for m in range(num_measures)]
 
-    anchors = []
-    for region in (BPP.REGION_A, BPP.REGION_B):
-        m = BPP.richest_measure_in_region(active_count, num_measures, region)
-        if m is not None:
-            anchors.append(m)
-    anchors = sorted(set(anchors))
+    anchors = BPP.top_measures(active_count, num_measures, k=ANCHORS_PER_SONG)
 
     rng = random.Random(SEED)
     out = []
@@ -263,44 +261,58 @@ def process_track(track_dir):
         emit(fa_clean, fb_clean, pos_label(), "positive", anchor, cp["combo_type"])
         stats["pos"] += 1
 
-        # augmented positive (both shifted equally) -- anti-shortcut for key/vertical
-        n = rng.choice(AUG_SHIFTS)
-        pmA_aug, pmB_aug = transpose_all(pmA, n), transpose_all(pmB, n)
-        fa_aug = os.path.join(OUT_DIR, f"{track}_{A}_p{anchor}_aug{uid}.pt")
-        fb_aug = os.path.join(OUT_DIR, f"{track}_{B}_p{anchor}_aug{uid}.pt")
-        pt_at_phase(pmA_aug, anchor, fa_aug)
-        pt_at_phase(pmB_aug, anchor, fb_aug)
-        emit(fa_aug, fb_aug, pos_label(), "augmented", anchor, cp["combo_type"])
-        stats["aug"] += 1
-        uid += 1
+        # augmented positives (both shifted equally) -- anti-shortcut for key/vertical
+        for n in rng.sample(AUG_SHIFTS, N_AUG):
+            pmA_aug, pmB_aug = transpose_all(pmA, n), transpose_all(pmB, n)
+            fa_aug = os.path.join(OUT_DIR, f"{track}_{A}_p{anchor}_aug{uid}.pt")
+            fb_aug = os.path.join(OUT_DIR, f"{track}_{B}_p{anchor}_aug{uid}.pt")
+            pt_at_phase(pmA_aug, anchor, fa_aug)
+            pt_at_phase(pmB_aug, anchor, fb_aug)
+            emit(fa_aug, fb_aug, pos_label(), "augmented", anchor, cp["combo_type"])
+            stats["aug"] += 1
+            uid += 1
 
+        # negatives: N_NEG variants per axis, corrupting A or B (chosen per variant)
         for axis in LABEL_COLS:
-            if axis == "vertical":
-                a_low = mean_pitch(pmA) <= mean_pitch(pmB)
-                ref_pm = pmA if a_low else pmB
-                clean_ref = fa_clean if a_low else fb_clean
-                corr_pm, inf = C.corrupt_vertical(copy.deepcopy(pmB if a_low else pmA), ref_pm, rng)
+            for v in range(N_NEG):
+                if axis == "vertical":
+                    # relational: corrupt the HIGHER-pitched loop vs the lower reference
+                    a_low = mean_pitch(pmA) <= mean_pitch(pmB)
+                    ref_pm = pmA if a_low else pmB
+                    clean_ref = fa_clean if a_low else fb_clean
+                    corr_pm, inf = C.corrupt_vertical(
+                        copy.deepcopy(pmB if a_low else pmA), ref_pm, rng, rank=v)
+                    if inf.get("notes_changed", 1) == 0:
+                        continue
+                    f_neg = os.path.join(OUT_DIR, f"{track}_p{anchor}_vertical{uid}.pt")
+                    pt_at_phase(corr_pm, anchor, f_neg)
+                    emit(clean_ref, f_neg, dict(zip(LABEL_COLS, C.LABELS[axis])), axis,
+                         anchor, cp["combo_type"])
+                    stats[axis] += 1
+                    uid += 1
+                    continue
+
+                # corrupt A or B at random (model must not assume "B is the broken one")
+                corrupt_A = rng.random() < 0.5
+                tgt_pm = pmA if corrupt_A else pmB
+                tgt_stem = A if corrupt_A else B
+                clean_partner = fb_clean if corrupt_A else fa_clean
+                pmc = copy.deepcopy(tgt_pm)
+                if axis == "key":
+                    pmc, inf = C.corrupt_key_midi(pmc, rng, steps=(-1 if v == 0 else 1))
+                elif axis == "tempo":
+                    pmc, inf = C.corrupt_tempo_midi(pmc, bpm, rng,
+                                                    direction=("fast" if v == 0 else "slow"))
+                else:  # timing -- rng draws a different offset each variant
+                    pmc, inf = C.corrupt_timing_midi(pmc, bpm, rng)
                 if inf.get("notes_changed", 1) == 0:
                     continue
-                fb_neg = os.path.join(OUT_DIR, f"{track}_p{anchor}_vertical{uid}.pt")
-                pt_at_phase(corr_pm, anchor, fb_neg)
-                emit(clean_ref, fb_neg, dict(zip(LABEL_COLS, C.LABELS[axis])), axis, anchor,
-                     cp["combo_type"])
+                f_neg = os.path.join(OUT_DIR, f"{track}_{tgt_stem}_p{anchor}_{axis}{uid}.pt")
+                pt_at_phase(pmc, anchor, f_neg)
+                emit(clean_partner, f_neg, dict(zip(LABEL_COLS, C.LABELS[axis])), axis,
+                     anchor, cp["combo_type"])
                 stats[axis] += 1
                 uid += 1
-                continue
-
-            fn = C.MIDI_CORRUPTIONS[axis]
-            pmBc = copy.deepcopy(pmB)
-            pmBc, inf = (fn(pmBc, bpm, rng) if axis in C.NEEDS_BPM else fn(pmBc, rng))
-            if inf.get("notes_changed", 1) == 0:
-                continue
-            fb_neg = os.path.join(OUT_DIR, f"{track}_{B}_p{anchor}_{axis}{uid}.pt")
-            pt_at_phase(pmBc, anchor, fb_neg)
-            emit(fa_clean, fb_neg, dict(zip(LABEL_COLS, C.LABELS[axis])), axis, anchor,
-                 cp["combo_type"])
-            stats[axis] += 1
-            uid += 1
 
     return rows, stats
 

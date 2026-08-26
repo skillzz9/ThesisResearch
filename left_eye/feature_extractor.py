@@ -13,10 +13,17 @@ class VisualFeatureExtractor:
         aligns them spatially, and stacks them into a 3-channel tensor: [CQT, Chromagram, CQT].
         """
         # 1. Extract Raw Features
-        # Constant-Q Transform (CQT) (84 vertical bins)
+        # Constant-Q Transform (CQT) (84 vertical bins), then LOG-COMPRESS to dB and
+        # normalise to [0,1]. Linear magnitude buries quiet notes/harmonics near zero;
+        # dB scaling makes the full dynamic range visible to the CNN. Using the clip's
+        # own max as reference also removes absolute loudness (an instrument
+        # fingerprint the model should not use).
         cqt = np.abs(librosa.cqt(y, sr=self.sr, n_bins=84))
-        
-        # Chromagram (12 vertical bins)
+        if cqt.max() > 0:
+            cqt = librosa.amplitude_to_db(cqt, ref=np.max, top_db=80.0)   # [-80, 0]
+            cqt = (cqt + 80.0) / 80.0                                     # [0, 1]
+
+        # Chromagram (12 vertical bins; per-frame normalised by librosa)
         chroma = librosa.feature.chroma_stft(y=y, sr=self.sr, n_chroma=12)
         
         # 2. Silence Weighting via RMS Energy Masking

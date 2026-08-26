@@ -138,6 +138,26 @@ def richest_measure_in_region(active_count, num_measures, region):
     return best_idx
 
 
+def top_measures(active_count, num_measures, k=6, min_count=MIN_STEMS_GOLDEN,
+                 min_gap=1, lo_frac=0.05, hi_frac=0.95):
+    """Up to k rich anchor measures across the whole song (not just 2 regions).
+    Picks the highest-activity measures with >= min_count active stems, spaced more
+    than min_gap measures apart so near-duplicate slices aren't extracted twice.
+    This is the main lever for extracting MORE pairs from the same songs."""
+    lo = int(lo_frac * num_measures)
+    hi = max(int(hi_frac * num_measures), lo + 1)
+    cands = [(active_count[m], m) for m in range(lo, min(hi, num_measures))
+             if active_count[m] >= min_count]
+    cands.sort(key=lambda t: (-t[0], t[1]))     # richest first, earliest breaks ties
+    chosen = []
+    for _, m in cands:
+        if all(abs(m - x) > min_gap for x in chosen):
+            chosen.append(m)
+        if len(chosen) >= k:
+            break
+    return sorted(chosen)
+
+
 # ---------------------------------------------------------------------------
 # Combo generation
 # ---------------------------------------------------------------------------

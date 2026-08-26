@@ -168,10 +168,12 @@ def circular_shift(pm, offset, L):
     return pm
 
 
-def corrupt_key_midi(pm, rng):
-    """Transpose every pitched note by +/-1 semitone -> key clash.
+def corrupt_key_midi(pm, rng, steps=None):
+    """Transpose every pitched note by +/-1 semitone -> key clash. `steps` can be forced
+    (e.g. -1 for variant 1, +1 for variant 2) so multiple negative variants differ.
     notes_changed = 0 means the stem has no pitched content (e.g. drums) -> skip."""
-    steps = rng.choice([-1, 1])
+    if steps is None:
+        steps = rng.choice([-1, 1])
     changed = 0
     for inst in pm.instruments:
         if inst.is_drum:
@@ -182,15 +184,17 @@ def corrupt_key_midi(pm, rng):
     return pm, {"axis": "key", "semitones": int(steps), "notes_changed": changed}
 
 
-def corrupt_tempo_midi(pm, bpm, rng, beats_per_slice=8):
+def corrupt_tempo_midi(pm, bpm, rng, beats_per_slice=8, direction=None):
     """Play the loop at a different tempo (+/-10-20%). The loop's cycle period becomes
     factor*L, and we TILE it to fill the window so a faster loop simply cycles more times
     -- NOT leaving trailing silence (which would be a single-loop shortcut). factor < 1
-    faster, factor > 1 slower."""
+    faster, factor > 1 slower. `direction` ('fast'/'slow') can be forced so variants differ."""
     beat = 60.0 / bpm
     L = beat * beats_per_slice
     pct = rng.uniform(0.10, 0.20)
-    factor = 1.0 - pct if rng.random() < 0.5 else 1.0 + pct
+    if direction is None:
+        direction = "fast" if rng.random() < 0.5 else "slow"
+    factor = 1.0 - pct if direction == "fast" else 1.0 + pct
     period = factor * L                       # the retimed loop repeats every factor*L
     changed = 0
     for inst in pm.instruments:
@@ -261,12 +265,14 @@ def corrupt_pitch_jitter_midi(pm, rng):
     return pm, {"axis": "pitch_jitter", "notes_changed": changed}
 
 
-def corrupt_vertical(pm_melody, pm_ref, rng):
+def corrupt_vertical(pm_melody, pm_ref, rng, rank=0):
     """Move each melody note to the most DISSONANT interval against the concurrent
     reference (bass) note -- but ONLY to pitch classes already present in the pair, so
     the loop STAYS IN KEY. This is what separates `vertical` from `key`: key changes the
     scale (out of key); vertical keeps the scale, breaks only the moment-to-moment
-    interval. RELATIONAL: needs the partner loop `pm_ref`. Corrupts pm_melody in place."""
+    interval. RELATIONAL: needs the partner loop `pm_ref`. Corrupts pm_melody in place.
+    `rank` picks the rank-th most dissonant in-scale class (0=worst, 1=second-worst) so
+    multiple negative variants differ."""
     ref = [(n.start, n.end, n.pitch) for inst in pm_ref.instruments
            if not inst.is_drum for n in inst.notes]
     if not ref:
@@ -291,8 +297,9 @@ def corrupt_vertical(pm_melody, pm_ref, rng):
             r = next((rp for (rs, re, rp) in ref if rs <= n.start < re), None)
             if r is None:
                 r = min(ref, key=lambda x: abs(x[0] - n.start))[2]
-            # pick the IN-SCALE pitch class that clashes hardest with the bass note
-            target_pc = max(scale, key=lambda pc: dissonance(pc, r))
+            # pick the rank-th most dissonant IN-SCALE pitch class vs the bass note
+            ranked = sorted(scale, key=lambda pc: -dissonance(pc, r))
+            target_pc = ranked[min(rank, len(ranked) - 1)]
             new = n.pitch + ((target_pc - n.pitch) % 12)      # nearest pitch of that class
             if new - n.pitch > 6:
                 new -= 12
