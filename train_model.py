@@ -128,10 +128,19 @@ class CompatModel(nn.Module):
     def __init__(self, C=128):
         super().__init__()
         self.enc = Encoder(C=C)
-        # KEY -> global summary (a global / time-invariant property: whole-loop key)
-        self.gmlp = nn.Sequential(nn.Linear(3 * C, 256), nn.ReLU(), nn.Dropout(0.3),
-                                  nn.Linear(256, 128), nn.ReLU())
-        self.key_head = nn.Linear(128, 1)
+        # KEY -> dedicated PITCH-CLASS branch, fully ISOLATED from the shared encoder.
+        # Why: the encoder's MaxPool collapses 84 freq bins -> 5 bands, erasing the
+        # 1-semitone shift a key clash is (and CNN translation-invariance suppresses it).
+        # This branch reads the RAW input at full 84-bin resolution: two convs learn
+        # harmonic cleanup (energy at f,2f,3f = one note), then the 7 octaves fold onto
+        # 12 pitch classes where a semitone shift is a plain ROTATION. A vs B alignment
+        # is read over all 12 rotations (same key -> peak at rotation 0). No weights are
+        # shared with other axes, so key's gradients cannot disturb them.
+        self.kconv = nn.Sequential(
+            nn.Conv2d(3, 16, (7, 5), padding=(3, 2)), nn.BatchNorm2d(16), nn.ReLU(),
+            nn.Conv2d(16, 16, (7, 5), padding=(3, 2)), nn.BatchNorm2d(16), nn.ReLU(),
+        )
+        self.key_head = nn.Sequential(nn.Linear(12, 32), nn.ReLU(), nn.Linear(32, 1))
         # CONSONANCE -> freq-preserving, TIME-ALIGNED A-vs-B comparison. Compares the two
         # loops frame-by-frame WITH the coarse frequency axis intact, so it can see the
         # per-moment vertical intervals (which the time-averaged summary throws away).
@@ -149,11 +158,29 @@ class CompatModel(nn.Module):
         self.rhy_gru = nn.GRU(128, 64, batch_first=True, bidirectional=True)
         self.rhy = nn.Linear(128 * 3 + 128, 2)
 
+    def _pc_profile(self, x):
+        """[B,3,84,T] -> [B,16,12] learned pitch-class profile: harmonic-cleanup convs at
+        full frequency resolution, pool time, fold 7 octaves onto 12 pitch classes,
+        L2-normalise per channel (removes loudness)."""
+        f = self.kconv(x)                          # [B,16,84,T] -- full freq resolution kept
+        f = f.mean(dim=3)                          # pool time (key is time-invariant) -> [B,16,84]
+        f = f.view(f.shape[0], f.shape[1], 7, 12).sum(dim=2)   # fold octaves -> [B,16,12]
+        return f / (f.norm(dim=2, keepdim=True) + 1e-6)
+
+    def _key_alignment(self, a, b):
+        """Symmetric 12-dim rotation-alignment spectrum of the two pitch-class profiles.
+        Same key -> alignment peaks at rotation 0; a transposed loop moves the peak."""
+        pa, pb = self._pc_profile(a), self._pc_profile(b)
+        xc = torch.stack([(pa * torch.roll(pb, r, dims=2)).sum(dim=(1, 2))
+                          for r in range(12)], dim=1)          # [B,12]
+        idx = [(-r) % 12 for r in range(12)]
+        return 0.5 * (xc + xc[:, idx])             # symmetric under A<->B swap
+
     def forward(self, a, b):
         ga, sa, fa = self.enc(a)
         gb, sb, fb = self.enc(b)
-        # key -- global summary
-        key = self.key_head(self.gmlp(sym(ga, gb)))                 # [B,1]
+        # key -- isolated pitch-class rotation alignment (sole input to the key head)
+        key = self.key_head(self._key_alignment(a, b))              # [B,1]
         # consonance -- per-frame freq-preserving comparison, then pool over time
         cc = self.cconv(sym(fa, fb)).mean(dim=2)                    # [B,64,T]  (pool freq)
         cc = self.cseq(cc)                                          # [B,64,T]
