@@ -299,7 +299,13 @@ def process_track(track_dir):
                 clean_partner = fb_clean if corrupt_A else fa_clean
                 pmc = copy.deepcopy(tgt_pm)
                 if axis == "key":
-                    pmc, inf = C.corrupt_key_midi(pmc, rng, steps=(-1 if v == 0 else 1))
+                    # variant 0: +/-1 semitone (the hardest, most dissonant case);
+                    # variant 1: a wider transposition (+/-2..6) so the model learns
+                    # "different key" in general, not just "shifted by exactly 1".
+                    # (+/-12 excluded: an octave has the SAME pitch classes = same key.)
+                    steps = (rng.choice([-1, 1]) if v == 0
+                             else rng.choice([-6, -5, -4, -3, -2, 2, 3, 4, 5, 6]))
+                    pmc, inf = C.corrupt_key_midi(pmc, rng, steps=steps)
                 elif axis == "tempo":
                     pmc, inf = C.corrupt_tempo_midi(pmc, bpm, rng,
                                                     direction=("fast" if v == 0 else "slow"))
