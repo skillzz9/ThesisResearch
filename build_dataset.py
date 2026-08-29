@@ -323,8 +323,13 @@ def process_track(track_dir):
                              else rng.choice([-6, -5, -4, -3, -2, 2, 3, 4, 5, 6]))
                     pmc, inf = C.corrupt_key_midi(pmc, rng, steps=steps)
                 elif axis == "tempo":
-                    pmc, inf = C.corrupt_tempo_midi(pmc, bpm, rng,
-                                                    direction=("fast" if v == 0 else "slow"))
+                    # variant 0: canonical 10-20% mismatch; variant 1: wider 5-28% band
+                    # (boundary cases + bigger clashes; ceiling keeps the tempo ratio
+                    # under ~1.4, clear of 3:2 polymeter and the 2:1 re-sync trap)
+                    pmc, inf = C.corrupt_tempo_midi(
+                        pmc, bpm, rng,
+                        direction=("fast" if v == 0 else "slow"),
+                        pct_range=((0.10, 0.20) if v == 0 else (0.05, 0.28)))
                 else:  # timing -- rng draws a different offset each variant
                     pmc, inf = C.corrupt_timing_midi(pmc, bpm, rng)
                 if inf.get("notes_changed", 1) == 0:

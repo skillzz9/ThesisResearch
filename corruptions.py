@@ -184,14 +184,19 @@ def corrupt_key_midi(pm, rng, steps=None):
     return pm, {"axis": "key", "semitones": int(steps), "notes_changed": changed}
 
 
-def corrupt_tempo_midi(pm, bpm, rng, beats_per_slice=8, direction=None):
-    """Play the loop at a different tempo (+/-10-20%). The loop's cycle period becomes
-    factor*L, and we TILE it to fill the window so a faster loop simply cycles more times
-    -- NOT leaving trailing silence (which would be a single-loop shortcut). factor < 1
-    faster, factor > 1 slower. `direction` ('fast'/'slow') can be forced so variants differ."""
+def corrupt_tempo_midi(pm, bpm, rng, beats_per_slice=8, direction=None, pct_range=(0.10, 0.20)):
+    """Play the loop at a different tempo. The loop's cycle period becomes factor*L, and
+    we TILE it to fill the window so a faster loop simply cycles more times -- NOT leaving
+    trailing silence (a single-loop shortcut). factor < 1 faster, > 1 slower.
+    `direction` ('fast'/'slow') and `pct_range` can be forced so variants differ.
+    Range bounds are perceptually motivated: floor >= 5% (below ~4%, drift over a 2-bar
+    loop is < ~0.3 beats = inaudible -> would be a FALSE negative). Ceiling: note the
+    fast side compounds (factor 1-pct -> tempo ratio 1/(1-pct)), so pct <= 0.28 keeps the
+    tempo ratio under ~1.39 -- safely below 3:2 (structured polymeter) and far from 2:1
+    (double-time, which RE-SYNCS and is musically compatible)."""
     beat = 60.0 / bpm
     L = beat * beats_per_slice
-    pct = rng.uniform(0.10, 0.20)
+    pct = rng.uniform(*pct_range)
     if direction is None:
         direction = "fast" if rng.random() < 0.5 else "slow"
     factor = 1.0 - pct if direction == "fast" else 1.0 + pct
