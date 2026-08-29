@@ -48,6 +48,15 @@ AUG_SHIFTS = [-5, -4, -3, -2, -1, 1, 2, 3, 4, 5]   # wider range -> better key i
 ANCHORS_PER_SONG = 6     # rich 2-bar anchors extracted per song (was 2) -> ~3x the pairs
 N_AUG = 2                # augmented positives per pair (different shared transpositions)
 N_NEG = 2                # negative variants per axis per pair (guaranteed different)
+
+# TIMBRE AUGMENTATION: render each loop with a randomised General-MIDI program, so the
+# same songs supply many instrument timbres / attack shapes. Measured motivation: onset
+# envelopes correlate 0.95-0.98 across sharp-attack instruments but 0.14 vs flute --
+# tempo/timing generalisation is starved of attack-family diversity, and timbre must not
+# be usable as a label shortcut. Pools keep bass stems in bass registers.
+TIMBRE_AUG = os.environ.get("TIMBRE_AUG", "1") == "1"
+MELODIC_POOL = [0, 4, 11, 24, 27, 40, 56, 64, 71, 73, 80, 81]   # piano..guitars..strings..winds..leads
+BASS_POOL = [32, 33, 34, 36, 38, 39]
 MIN_FILL = 0.6           # a stem's MIDI must cover >=60% of the measure with notes to be
                          # paired (measured on the MIDI we render, not Slakh's reverb-filled
                          # audio) -> stops sparse/silent loops entering the dataset
@@ -237,9 +246,16 @@ def process_track(track_dir):
         return random.Random(SEED * 7919 + anchor).uniform(0.0, measure_dur)
 
     def pt_at_phase(pm, anchor, path):
-        """Render a loop rolled by the anchor's phase (phase augmentation) -> .pt.
+        """Render a loop rolled by the anchor's phase (phase augmentation), with a
+        randomised instrument program (timbre augmentation) -> .pt.
         Operates on a COPY so the caller's pm (used for corruption logic) is untouched."""
         rolled = C.circular_shift(copy.deepcopy(pm), phase_of(anchor), measure_dur)
+        if TIMBRE_AUG:
+            for inst in rolled.instruments:
+                if inst.is_drum:
+                    continue
+                pool = BASS_POOL if 32 <= inst.program <= 39 else MELODIC_POOL
+                inst.program = rng.choice(pool)
         midi_to_pt(rolled, measure_samples, path)
         return path
 
