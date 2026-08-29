@@ -37,18 +37,22 @@ def train_eval(train_df, val_df, device, epochs, lr=3e-4, batch=32):
     return metrics(Pva, Yva, thr)          # (auc, bal-acc) dicts on UNSEEN
 
 
-def run(manifest="dataset.csv", epochs=15, n_val=3, seed=42):
+def run(manifest="dataset.csv", epochs=15, n_val=3, seed=42, sizes=None):
     device = torch.device("cuda" if torch.cuda.is_available()
                           else "mps" if torch.backends.mps.is_available() else "cpu")
     df = pd.read_csv(manifest)
     songs = sorted(df["track"].unique())
     rng = random.Random(seed); rng.shuffle(songs)
+    # scale n_val with corpus size (>=3, ~15% of songs) so the fixed val set is meaningful
+    n_val = max(n_val, int(0.15 * len(songs)))
     val_songs = songs[:n_val]
     pool = songs[n_val:]
     val_df = df[df["track"].isin(val_songs)].reset_index(drop=True)
-    print(f"{device.type} | fixed val={val_songs} ({len(val_df)} pairs) | pool={len(pool)} songs")
+    print(f"{device.type} | fixed val={len(val_songs)} songs ({len(val_df)} pairs) | pool={len(pool)} songs")
 
-    sizes = list(range(2, len(pool), 2)) + [len(pool)]
+    if sizes is None:
+        sizes = list(range(2, len(pool), 2)) + [len(pool)]
+    sizes = sorted(set(min(s, len(pool)) for s in sizes))
     print(f"\n{'#songs':>7s} {'#pairs':>7s} | bal-acc: " + " ".join(f"{ax[:5]:>6s}" for ax in AXES)
           + f" {'MEAN':>6s} | AUC mean")
     rows = []
@@ -76,5 +80,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=15)
     ap.add_argument("--manifest", default="dataset.csv")
+    ap.add_argument("--sizes", default=None,
+                    help="comma-separated training-song counts, e.g. '10,25,50,85' (default: 2,4,6,...)")
     a = ap.parse_args()
-    run(a.manifest, a.epochs)
+    sz = [int(x) for x in a.sizes.split(",")] if a.sizes else None
+    run(a.manifest, a.epochs, sizes=sz)

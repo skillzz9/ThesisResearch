@@ -19,7 +19,7 @@ fi
 fluidsynth --version | head -1
 
 echo "== 2. python deps =="
-pip install -q pretty_midi librosa soundfile numpy pyyaml mido torch torchvision
+pip install -q pretty_midi librosa soundfile numpy pyyaml mido torch torchvision pandas matplotlib
 
 echo "== 3. soundfont =="
 mkdir -p soundfonts
