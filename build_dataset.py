@@ -354,7 +354,9 @@ def build(root_dir=ROOT_DIR, manifest=MANIFEST, n_tracks=N_TRACKS, workers=None)
         tracks = tracks[:n_tracks]
 
     workers = workers or max(1, mp.cpu_count() - 1)
-    print(f"Building {len(tracks)} tracks on {workers} workers -> {OUT_DIR}/")
+    import time
+    t0 = time.time()
+    print(f"Building {len(tracks)} tracks on {workers} workers -> {OUT_DIR}/", flush=True)
 
     rows = []
     stats = {"pos": 0, "aug": 0}
@@ -366,7 +368,10 @@ def build(root_dir=ROOT_DIR, manifest=MANIFEST, n_tracks=N_TRACKS, workers=None)
             rows.extend(trows)
             for k, v in tstats.items():
                 stats[k] = stats.get(k, 0) + v
-            print(f"  [{i}/{len(tracks)}] +{len(trows)} pairs  (total {len(rows)})")
+            el = time.time() - t0
+            eta = el / i * (len(tracks) - i)
+            print(f"  [{i}/{len(tracks)}] +{len(trows)} pairs (total {len(rows)}) | "
+                  f"{el/60:.1f}m elapsed, ~{eta/60:.0f}m left", flush=True)
 
     with open(manifest, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))

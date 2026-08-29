@@ -53,6 +53,7 @@ def run(manifest="dataset.csv", k=5, epochs=15, lr=3e-4, batch=32):
         va = df[df["track"].isin(val_tracks)].reset_index(drop=True)
         if len(va) == 0:
             continue
+        print(f"  fold {fi}/{k}: training on {len(tr)} pairs ({epochs} epochs)...", flush=True)
         model = train_one(tr, device, epochs, lr, batch)
         cl = DataLoader(PairDataset(tr), batch_size=batch, shuffle=False, num_workers=4)
         recalibrate_bn(model, cl, device)

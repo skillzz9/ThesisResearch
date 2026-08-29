@@ -59,6 +59,7 @@ def run(manifest="dataset.csv", epochs=15, n_val=3, seed=42, sizes=None, n_seeds
     for n in sizes:
         tr = df[df["track"].isin(pool[:n])].reset_index(drop=True)
         for s in range(n_seeds):
+            print(f"  training: {n} songs ({len(tr)} pairs), seed {s+1}/{n_seeds}...", flush=True)
             torch.manual_seed(1000 + s); random.seed(1000 + s); np.random.seed(1000 + s)
             auc, bal = train_eval(tr, val_df, device, epochs)
             per_size[n].append(bal)
