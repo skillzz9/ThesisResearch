@@ -14,28 +14,38 @@ git clone https://github.com/skillzz9/ThesisResearch.git && cd ThesisResearch
 bash setup_pod.sh          # installs fluidsynth, python deps, downloads the soundfont
 ```
 
-## 2. Get Slakh2100 MIDI + metadata WITHOUT storing the 105 GB archive
+## 2. Get a SLICE of Slakh2100 (~8 GB transferred, not 105 GB)
 
-Slakh2100 (flac redux) lives at https://zenodo.org/records/4599666. We only need each
-track's `MIDI/*.mid`, `all_src.mid`, and `metadata.yaml` — stream the tarball through tar
-and keep only those (disk cost: a few GB; the FLAC stems are never written):
+Slakh2100 (flac redux) lives at https://zenodo.org/records/4599666 as ONE sequential
+tar.gz — you can't seek into it, BUT tracks are stored in order, so the first ~150
+tracks occupy roughly the first 8 GB of the stream. Download only the head of the
+stream, extracting MIDI + metadata as it flows (FLAC stems are never written):
 
 ```bash
 mkdir -p /data && cd /data
-curl -L https://zenodo.org/record/4599666/files/slakh2100_flac_redux.tar.gz \
-  | tar -xz --wildcards \
-      'slakh2100_flac_redux/train/*/MIDI/*' \
-      'slakh2100_flac_redux/train/*/all_src.mid' \
-      'slakh2100_flac_redux/train/*/metadata.yaml'
+URL=https://zenodo.org/record/4599666/files/slakh2100_flac_redux.tar.gz
+
+# optional sanity peek at archive order (streams only a few MB, Ctrl-C after a moment):
+# curl -sL $URL | tar -tz | head -20
+
+# take the first 8 GB of the stream, keep only MIDI/metadata ('|| true' because tar
+# reports the truncated end -- extracted files are fine):
+curl -L $URL | head -c 8G | tar -xz --wildcards \
+  'slakh2100_flac_redux/train/*/MIDI/*' \
+  'slakh2100_flac_redux/train/*/all_src.mid' \
+  'slakh2100_flac_redux/train/*/metadata.yaml' || true
+
+ls slakh2100_flac_redux/train | wc -l    # want >= 120 track dirs (need 100 usable 4/4)
 cd -
 ```
 
 Notes:
-- This still *transfers* ~105 GB (gzip streams aren't seekable) but never stores it.
-  On a datacentre pipe that's ~15-45 min. If bandwidth is scarce, download the tarball
-  to disk instead and extract the same patterns, then delete it.
-- `train/` alone contains 1500 tracks — far more than the 100 we need; the build's
-  `--n-tracks 100` takes the first 100 usable (4/4) ones.
+- If the count comes back under ~120, rerun with `head -c 12G` (tar re-extracts over
+  the same directory harmlessly).
+- ~8 GB from Zenodo ≈ 10-25 min. For the FULL 2100-song run later, drop the
+  `head -c 8G` and let the whole 105 GB stream through (1-3 h; still no disk cost
+  beyond the MIDI).
+- The build's `--n-tracks 100` then takes the first 100 usable (4/4) tracks.
 
 ## 3. Build the 100-song dataset (~20-60 min depending on cores)
 
