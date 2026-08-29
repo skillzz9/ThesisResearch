@@ -301,6 +301,8 @@ def train(manifest="dataset.csv", epochs=40, batch=32, lr=3e-4):
     crit = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     best_score, best_state = -1.0, None
+    history = []                                  # per-eval-epoch metrics -> CSV + graphs
+    last_tr_bal, last_va_bal = None, None
     for ep in range(1, epochs + 1):
         model.train()
         tot = 0.0
@@ -336,9 +338,25 @@ def train(manifest="dataset.csv", epochs=40, batch=32, lr=3e-4):
             best_score = mean_unseen_auc
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
+        row = {"ep": ep, "loss": tot / len(tl)}
+        for ax in AXES:
+            row[f"{ax}_tr_acc"] = tr_bal[ax]; row[f"{ax}_va_acc"] = va_bal[ax]
+            row[f"{ax}_tr_auc"] = tr_auc[ax]; row[f"{ax}_va_auc"] = va_auc[ax]
+        history.append(row)
+        last_tr_bal, last_va_bal = tr_bal, va_bal
+
     os.makedirs("models", exist_ok=True)
     torch.save(best_state or model.state_dict(), "models/compat_model.pth")
     print(f"saved BEST -> models/compat_model.pth  (mean unseen AUC={best_score:.3f})")
+
+    # evidence artifacts: per-epoch log + graphs (epoch curves, seen-vs-unseen gap)
+    import plots
+    os.makedirs("runs", exist_ok=True)
+    pd.DataFrame(history).to_csv("runs/train_log.csv", index=False)
+    if history:
+        print("graph ->", plots.epoch_curves(history))
+    if last_tr_bal and last_va_bal:
+        print("graph ->", plots.gap_bars(last_tr_bal, last_va_bal))
 
 
 if __name__ == "__main__":

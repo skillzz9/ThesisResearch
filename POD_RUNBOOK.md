@@ -54,18 +54,32 @@ song). Timbre + phase augmentation are on by default (TIMBRE_AUG=1).
 ## 4. Train + measure (the same protocol as the PoC)
 
 ```bash
-python train_model.py --epochs 20                      # single split, sanity + demo model
-python kfold.py --k 5 --epochs 15                      # THE criteria measurement (pooled)
-python scaling_curve.py --epochs 15 --sizes 10,25,50,85   # extends the scaling evidence
-python predict_pair.py                                 # qualitative per-axis demo
+python train_model.py --epochs 20                          # single split, sanity + demo model
+python kfold.py --k 5 --epochs 15                          # THE criteria measurement (pooled)
+python scaling_curve.py --epochs 15 --sizes 10,25,50,85 --seeds 3   # scaling evidence with ERROR BARS
+python predict_pair.py                                     # qualitative per-axis demo
 ```
+
+Every script auto-generates its evidence graphs into `graphs/` and raw logs into `runs/`
+(all thesis figures are regenerable from the logged numbers):
+
+| Graph | Produced by | Shows |
+|---|---|---|
+| `graphs/epoch_curves.png`      | train_model | loss + per-axis seen/unseen accuracy across epochs |
+| `graphs/seen_unseen_gap.png`   | train_model | fit vs generalisation per axis (overfit picture) |
+| `graphs/roc_curves.png`        | kfold       | per-axis ROC on pooled held-out predictions |
+| `graphs/criteria_scorecard.png`| kfold       | pooled acc + AUC bars vs the 0.60 / 0.70 criteria |
+| `graphs/scaling_curves.png`    | scaling_curve | unseen accuracy vs #songs, mean ± std over seeds |
+
+Raw logs: `runs/train_log.csv`, `runs/kfold_pooled.npz`, `runs/scaling_log.csv`.
 
 ## 5. What to bring back
 
 1. The `POOLED HELD-OUT` table from `kfold.py` (per-axis acc + AUC) — score it against:
    every axis acc >= 0.60 and AUC >= 0.70; means >= 0.65 / 0.75.
 2. The `TREND` block from `scaling_curve.py` (does the curve keep rising at 10->85 songs?).
-3. `nohup`/tmux logs of all runs (for the thesis appendix).
+3. The whole `graphs/` and `runs/` directories (thesis figures + regenerable raw numbers).
+4. `nohup`/tmux logs of all runs (for the thesis appendix).
 
 Decision gate (pre-registered):
 - PASS  (all axes clear both bars)      -> run full 2100 for headline numbers

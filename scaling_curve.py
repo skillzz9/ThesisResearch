@@ -37,7 +37,7 @@ def train_eval(train_df, val_df, device, epochs, lr=3e-4, batch=32):
     return metrics(Pva, Yva, thr)          # (auc, bal-acc) dicts on UNSEEN
 
 
-def run(manifest="dataset.csv", epochs=15, n_val=3, seed=42, sizes=None):
+def run(manifest="dataset.csv", epochs=15, n_val=3, seed=42, sizes=None, n_seeds=1):
     device = torch.device("cuda" if torch.cuda.is_available()
                           else "mps" if torch.backends.mps.is_available() else "cpu")
     df = pd.read_csv(manifest)
@@ -53,27 +53,37 @@ def run(manifest="dataset.csv", epochs=15, n_val=3, seed=42, sizes=None):
     if sizes is None:
         sizes = list(range(2, len(pool), 2)) + [len(pool)]
     sizes = sorted(set(min(s, len(pool)) for s in sizes))
-    print(f"\n{'#songs':>7s} {'#pairs':>7s} | bal-acc: " + " ".join(f"{ax[:5]:>6s}" for ax in AXES)
-          + f" {'MEAN':>6s} | AUC mean")
-    rows = []
+    print(f"\n{'#songs':>7s} {'#pairs':>7s} {'seed':>5s} | bal-acc: "
+          + " ".join(f"{ax[:5]:>6s}" for ax in AXES) + f" {'MEAN':>6s}")
+    per_size = {n: [] for n in sizes}                     # list of bal dicts per seed
     for n in sizes:
         tr = df[df["track"].isin(pool[:n])].reset_index(drop=True)
-        auc, bal = train_eval(tr, val_df, device, epochs)
-        mb = float(np.nanmean([bal[ax] for ax in AXES]))
-        ma = float(np.nanmean([auc[ax] for ax in AXES]))
-        rows.append((n, bal, mb))
-        print(f"{n:7d} {len(tr):7d} |          " + " ".join(f"{bal[ax]:6.2f}" for ax in AXES)
-              + f" {mb:6.2f} | {ma:.2f}")
+        for s in range(n_seeds):
+            torch.manual_seed(1000 + s); random.seed(1000 + s); np.random.seed(1000 + s)
+            auc, bal = train_eval(tr, val_df, device, epochs)
+            per_size[n].append(bal)
+            mb = float(np.nanmean([bal[ax] for ax in AXES]))
+            print(f"{n:7d} {len(tr):7d} {s:5d} |          "
+                  + " ".join(f"{bal[ax]:6.2f}" for ax in AXES) + f" {mb:6.2f}")
 
-    print("\n=== TREND: unseen balanced accuracy vs #training songs ===")
+    mean = {ax: [float(np.mean([b[ax] for b in per_size[n]])) for n in sizes] for ax in AXES}
+    std = {ax: [float(np.std([b[ax] for b in per_size[n]])) for n in sizes] for ax in AXES}
+    print("\n=== TREND: unseen balanced accuracy vs #training songs (mean over seeds) ===")
     for ax in AXES:
-        vals = [r[1][ax] for r in rows]
+        vals = mean[ax]
         d = vals[-1] - vals[0]
         tag = "RISING ↑" if d > 0.04 else ("flat ~" if abs(d) <= 0.04 else "FALLING ↓")
         print(f"  {ax:11s} " + " -> ".join(f"{v:.2f}" for v in vals) + f"   {tag}")
-    means = [r[2] for r in rows]
-    print(f"  {'MEAN':11s} " + " -> ".join(f"{m:.2f}" for m in means))
+    mm = [float(np.mean([mean[ax][i] for ax in AXES])) for i in range(len(sizes))]
+    print(f"  {'MEAN':11s} " + " -> ".join(f"{m:.2f}" for m in mm))
     print("\nRising = the per-axis gaps are DATA-limited -> scale run justified.")
+
+    # evidence artifacts: raw numbers + error-bar figure
+    import plots
+    os.makedirs("runs", exist_ok=True)
+    recs = [{"songs": n, "seed": s, **per_size[n][s]} for n in sizes for s in range(len(per_size[n]))]
+    pd.DataFrame(recs).to_csv("runs/scaling_log.csv", index=False)
+    print("graph ->", plots.scaling_curves(sizes, mean, std))
 
 
 if __name__ == "__main__":
@@ -82,6 +92,7 @@ if __name__ == "__main__":
     ap.add_argument("--manifest", default="dataset.csv")
     ap.add_argument("--sizes", default=None,
                     help="comma-separated training-song counts, e.g. '10,25,50,85' (default: 2,4,6,...)")
+    ap.add_argument("--seeds", type=int, default=1, help="training runs per size (mean +/- std)")
     a = ap.parse_args()
     sz = [int(x) for x in a.sizes.split(",")] if a.sizes else None
-    run(a.manifest, a.epochs, sizes=sz)
+    run(a.manifest, a.epochs, sizes=sz, n_seeds=a.seeds)

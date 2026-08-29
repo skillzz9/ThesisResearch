@@ -71,7 +71,7 @@ def run(manifest="dataset.csv", k=5, epochs=15, lr=3e-4, batch=32):
     print(" POOLED HELD-OUT (every pair scored by a model that never saw its song)")
     print("=" * 70)
     print(f"{'axis':12s} {'AUC':>6s} {'bal-acc':>8s} {'clash-rec':>10s} {'compat-rec':>11s} {'#clash':>7s}")
-    means = {"auc": [], "bal": []}
+    acc_d, auc_d = {}, {}
     for j, ax in enumerate(AXES):
         p, y, pr = P[:, j], Y[:, j], PR[:, j]
         auc = _auc(p, y)
@@ -79,11 +79,18 @@ def run(manifest="dataset.csv", k=5, epochs=15, lr=3e-4, batch=32):
         rc = ((pr == y) & neg).sum().item() / max(1, int(neg.sum()))
         rk = ((pr == y) & pos).sum().item() / max(1, int(pos.sum()))
         bal = 0.5 * (rc + rk)
-        means["auc"].append(auc); means["bal"].append(bal)
+        acc_d[ax], auc_d[ax] = bal, auc
         print(f"{ax:12s} {auc:6.2f} {bal:8.2f} {rc:10.2f} {rk:11.2f} {int(neg.sum()):7d}")
     print("=" * 70)
-    print(f"MEAN pooled: AUC={np.nanmean(means['auc']):.3f}  bal-acc={np.nanmean(means['bal']):.3f}")
+    print(f"MEAN pooled: AUC={np.nanmean(list(auc_d.values())):.3f}  bal-acc={np.nanmean(list(acc_d.values())):.3f}")
     print("CRITERIA: C1 AUC>=0.70/axis, mean>=0.75 | C2 bal-acc>=0.60/axis, mean>=0.65")
+
+    # evidence artifacts: raw pooled predictions + ROC + criteria scorecard graphs
+    import plots
+    os.makedirs("runs", exist_ok=True)
+    np.savez("runs/kfold_pooled.npz", P=P.numpy(), Y=Y.numpy(), PR=PR.numpy())
+    print("graph ->", plots.roc_curves(P.numpy(), Y.numpy(), auc_d))
+    print("graph ->", plots.criteria_bars(acc_d, auc_d))
 
 
 if __name__ == "__main__":
