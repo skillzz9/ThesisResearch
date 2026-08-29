@@ -9,8 +9,9 @@
 set -e
 
 echo "== 1. system: fluidsynth =="
+SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"   # cloud pods are usually root with no sudo
 if command -v apt-get >/dev/null; then
-  sudo apt-get update -y && sudo apt-get install -y fluidsynth curl
+  $SUDO apt-get update -y && $SUDO apt-get install -y fluidsynth curl
 elif command -v brew >/dev/null; then
   brew install fluid-synth curl
 else
@@ -19,7 +20,8 @@ fi
 fluidsynth --version | head -1
 
 echo "== 2. python deps =="
-pip install -q pretty_midi librosa soundfile numpy pyyaml mido torch torchvision pandas matplotlib
+python -c "import torch" 2>/dev/null || pip install -q torch   # keep the pod's preinstalled CUDA torch
+pip install -q pretty_midi librosa soundfile numpy pyyaml mido pandas matplotlib
 
 echo "== 3. soundfont =="
 mkdir -p soundfonts
