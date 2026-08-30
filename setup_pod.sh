@@ -21,7 +21,12 @@ fluidsynth --version | head -1
 
 echo "== 2. python deps =="
 python -c "import torch" 2>/dev/null || pip install -q torch   # keep the pod's preinstalled CUDA torch
-pip install -q pretty_midi librosa soundfile numpy pyyaml mido pandas matplotlib
+# PIN numpy<2: numpy 2.x against a librosa/numba built for 1.x SEGFAULTS inside
+# librosa.cqt (observed on the pod: worker crashes on the first productive track).
+# librosa 0.10.2 + numba>=0.59 is a known-good trio with numpy 1.26.
+pip install -q "numpy<2" "librosa==0.10.2" "numba>=0.59" \
+  pretty_midi soundfile pyyaml mido pandas matplotlib
+python -c "import numpy,librosa,numba; print('  versions:',numpy.__version__,librosa.__version__,numba.__version__)"
 
 echo "== 3. soundfont =="
 mkdir -p soundfonts
