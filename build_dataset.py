@@ -363,7 +363,12 @@ def build(root_dir=ROOT_DIR, manifest=MANIFEST, n_tracks=N_TRACKS, workers=None)
     for ax in LABEL_COLS:
         stats[ax] = 0
 
-    with mp.Pool(workers) as pool:
+    # SPAWN, not fork: on Linux, fork()ing a parent whose torch/BLAS threads hold locks
+    # deadlocks every worker on a futex (observed on the pod: all workers in
+    # futex_wait_queue, zero renders). macOS defaults to spawn, which is why this never
+    # appeared locally. Spawned workers re-import this module fresh -- no inherited locks.
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(workers) as pool:
         for i, (trows, tstats) in enumerate(pool.imap_unordered(process_track, tracks), 1):
             rows.extend(trows)
             for k, v in tstats.items():
