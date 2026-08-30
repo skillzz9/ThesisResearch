@@ -7,11 +7,13 @@ a shifted energy onset, an early offset (trailing silence), or a changed total e
 -- the model can cheat by looking at B alone. This renders clean B vs each corrupted B
 across several pairs and reports how much B's OWN envelope changed. Near-zero = clean.
 """
-import copy, random, glob, os
+import copy, random, glob, os, argparse
 import numpy as np
 import build_dataset as BD, corruptions as C, midi_utils as M
 
 SR = M.RENDER_SR
+# audit the SAME corpus the build used: --root arg > SLAKH_ROOT env > build's default
+ROOT = os.environ.get("SLAKH_ROOT", BD.ROOT_DIR)
 
 def envelope(pm, dur):
     y = M.render_midi(pm)
@@ -22,12 +24,16 @@ def envelope(pm, dur):
     off = (len(e) - np.argmax(e[::-1] > thr)) / SR if e.max() > 0 else 0.0
     return on, off, float((y ** 2).sum())
 
-def audit(n_pairs=6):
+def audit(n_pairs=6, root=None):
+    root = root or ROOT
     rng = random.Random(0)
     axes = ["key", "vertical", "tempo", "timing"]
     acc = {ax: {"don": [], "doff": [], "dE": []} for ax in axes}
     got = 0
-    for td in sorted(glob.glob(f"{BD.ROOT_DIR}/Track*")):
+    tracks = sorted(glob.glob(f"{root}/Track*"))
+    if not tracks:
+        print(f"!! no tracks under {root} -- pass --root or set SLAKH_ROOT"); return
+    for td in tracks:
         if not os.path.isdir(td) or got >= n_pairs:
             continue
         sel = BD.select_track(td)
@@ -65,4 +71,8 @@ def audit(n_pairs=6):
         print(f"{ax:11s} {don:10.3f} {doff:11.3f} {dE:12.2f}   {'LEAK ⚠' if leak else 'clean ✓'}")
 
 if __name__ == "__main__":
-    audit()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default=None, help="track corpus dir (default: SLAKH_ROOT env / build default)")
+    ap.add_argument("--n-pairs", type=int, default=6)
+    a = ap.parse_args()
+    audit(n_pairs=a.n_pairs, root=a.root)
