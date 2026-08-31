@@ -32,9 +32,23 @@ def _to_tensor(path):
     return t.unsqueeze(0)
 
 
+def _mix(a_path, b_path):
+    """Load both loops and overlay them (A + B) so you can HEAR the pair together.
+    Returns (sample_rate, mono float32) for a gradio Audio player."""
+    ya, _ = librosa.load(a_path, sr=M.RENDER_SR, mono=True)
+    yb, _ = librosa.load(b_path, sr=M.RENDER_SR, mono=True)
+    n = max(len(ya), len(yb))
+    ya = np.pad(ya, (0, n - len(ya))); yb = np.pad(yb, (0, n - len(yb)))
+    mix = ya + yb
+    peak = np.max(np.abs(mix))
+    if peak > 0:
+        mix = mix / peak * 0.97           # normalise to avoid clipping
+    return (M.RENDER_SR, mix.astype(np.float32))
+
+
 def compare(a_path, b_path):
     if not a_path or not b_path:
-        return "<p style='color:#888'>Upload two loops, then click Check.</p>"
+        return "<p style='color:#888'>Upload two loops (or click an example), then click Check.</p>", None
     with torch.no_grad():
         p = torch.sigmoid(_model(_to_tensor(a_path), _to_tensor(b_path)))[0].numpy()
     rows, clashes = "", []
@@ -60,9 +74,10 @@ def compare(a_path, b_path):
                "&#10003; Compatible on all four axes</div>") if not clashes else (
                f"<div style='font-size:17px;font-weight:700;color:#c23a31;margin-top:10px'>"
                f"&#9888; Clash on: {', '.join(clashes)}</div>")
-    return (f"<div style='font-family:system-ui;max-width:520px'>"
+    html = (f"<div style='font-family:system-ui;max-width:520px'>"
             f"<div style='font-size:13px;color:#888;margin-bottom:6px'>bar = P(compatible); "
             f"faded + labelled CLASH = below the decision threshold</div>{rows}{verdict}</div>")
+    return html, _mix(a_path, b_path)
 
 
 def _ensure_test_loops():
@@ -100,7 +115,9 @@ with gr.Blocks(title="Loop Compatibility") as demo:
         a = gr.Audio(label="Loop A", type="filepath")
         b = gr.Audio(label="Loop B", type="filepath")
     btn = gr.Button("Check compatibility", variant="primary")
-    out = gr.HTML()
+    with gr.Row():
+        out = gr.HTML()
+        mixed = gr.Audio(label="▶ A + B played together (judge with your own ears)", type="numpy")
 
     gr.Markdown("### Example pairs — click to load, then press **Check compatibility**")
     gr.Examples(
@@ -110,7 +127,7 @@ with gr.Blocks(title="Loop Compatibility") as demo:
         label="",
     )
 
-    btn.click(compare, inputs=[a, b], outputs=out)
+    btn.click(compare, inputs=[a, b], outputs=[out, mixed])
 
 if __name__ == "__main__":
     demo.launch()
