@@ -22,3 +22,6 @@ dataset_pairs.csv
 # Temporary Files
 scratch/
 *.pt
+
+# demo-generated audio
+test_loops/
