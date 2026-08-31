@@ -13,7 +13,7 @@ from left_eye.feature_extractor import VisualFeatureExtractor
 import midi_utils as M
 
 NICE = {"key": "key", "vertical": "consonance", "tempo": "tempo", "timing": "timing"}
-THRESHOLDS = {"key": 0.47, "vertical": 0.60, "tempo": 0.40, "timing": 0.40}
+THRESHOLDS = {"key": 0.525, "vertical": 0.40, "tempo": 0.40, "timing": 0.35}
 COLOR = {"key": "#9b2f7a", "vertical": "#b0472f", "tempo": "#0d7d8c", "timing": "#1f6f54"}
 MODEL_PATH = "models/compat_model.pth"
 

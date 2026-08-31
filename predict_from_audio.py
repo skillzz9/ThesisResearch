@@ -19,8 +19,8 @@ from left_eye.feature_extractor import VisualFeatureExtractor
 import midi_utils as M
 
 NICE = {"key": "key", "vertical": "consonance", "tempo": "tempo", "timing": "timing"}
-# calibrated thresholds from the 100-song k-fold run (train-side balanced-accuracy optimum)
-DEFAULT_THRESHOLDS = {"key": 0.47, "vertical": 0.60, "tempo": 0.40, "timing": 0.40}
+# calibrated decision thresholds (train-side balanced-accuracy optimum for the shipped model)
+DEFAULT_THRESHOLDS = {"key": 0.525, "vertical": 0.40, "tempo": 0.40, "timing": 0.35}
 
 
 def audio_to_tensor(path, vfe, target_t=TARGET_T):
