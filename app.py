@@ -65,17 +65,52 @@ def compare(a_path, b_path):
             f"faded + labelled CLASH = below the decision threshold</div>{rows}{verdict}</div>")
 
 
+def _ensure_test_loops():
+    """Render the 10 example loops if they're not already on disk."""
+    import glob
+    if len(glob.glob("test_loops/*.wav")) < 10:
+        import make_test_loops
+        make_test_loops.main()
+
+
+_ensure_test_loops()
+TL = "test_loops"
+EXAMPLE_PAIRS = [
+    [f"{TL}/song1_A.wav", f"{TL}/song1_B_ok.wav"],
+    [f"{TL}/song1_A.wav", f"{TL}/song1_B_KEY.wav"],
+    [f"{TL}/song1_A.wav", f"{TL}/song1_B_TEMPO.wav"],
+    [f"{TL}/song1_A.wav", f"{TL}/song1_B_TIMING.wav"],
+    [f"{TL}/song2_A.wav", f"{TL}/song2_B_ok.wav"],
+    [f"{TL}/song2_A.wav", f"{TL}/song2_B_CONSONANCE.wav"],
+    [f"{TL}/song2_A.wav", f"{TL}/song2_B_TEMPO.wav"],
+    [f"{TL}/song2_A.wav", f"{TL}/song2_B_TIMING.wav"],
+    [f"{TL}/song1_A.wav", f"{TL}/song2_A.wav"],
+]
+EXAMPLE_LABELS = [
+    "Song 1 — compatible", "Song 1 — KEY clash", "Song 1 — TEMPO clash", "Song 1 — TIMING clash",
+    "Song 2 — compatible", "Song 2 — CONSONANCE clash", "Song 2 — TEMPO clash", "Song 2 — TIMING clash",
+    "Two different songs",
+]
+
 with gr.Blocks(title="Loop Compatibility") as demo:
     gr.Markdown("# 🎼 Per-Axis Loop Compatibility\nUpload two audio loops — the model reports "
-                "whether they clash on **key, consonance, tempo, or timing**.")
+                "whether they clash on **key, consonance, tempo, or timing**. "
+                "Or click an example below to load a pair.")
     with gr.Row():
         a = gr.Audio(label="Loop A", type="filepath")
         b = gr.Audio(label="Loop B", type="filepath")
     btn = gr.Button("Check compatibility", variant="primary")
     out = gr.HTML()
+
+    gr.Markdown("### Example pairs — click to load, then press **Check compatibility**")
+    gr.Examples(
+        examples=EXAMPLE_PAIRS,
+        inputs=[a, b],
+        example_labels=EXAMPLE_LABELS,
+        label="",
+    )
+
     btn.click(compare, inputs=[a, b], outputs=out)
-    gr.Markdown("Tip: generate test loops with `python make_test_loops.py` "
-                "(compatible + one clash per axis in `test_loops/`).")
 
 if __name__ == "__main__":
     demo.launch()
