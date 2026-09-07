@@ -8,14 +8,19 @@
 #     --manifest /data/dataset.csv --workers $(nproc)
 set -e
 
-echo "== 1. system: fluidsynth =="
-SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"   # cloud pods are usually root with no sudo
-if command -v apt-get >/dev/null; then
-  $SUDO apt-get update -y && $SUDO apt-get install -y fluidsynth curl
+echo "== 1. system: fluidsynth (+ aria2, tmux helpers) =="
+if command -v fluidsynth >/dev/null; then
+  echo "fluidsynth already present"
+elif command -v conda >/dev/null; then
+  # preferred on managed clusters (no root/sudo, e.g. uni HPC): conda-forge has everything
+  conda install -y -c conda-forge fluidsynth aria2 tmux
+elif command -v apt-get >/dev/null; then
+  SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"   # cloud pods are usually root with no sudo
+  $SUDO apt-get update -y && $SUDO apt-get install -y fluidsynth curl aria2 tmux
 elif command -v brew >/dev/null; then
   brew install fluid-synth curl
 else
-  echo "!! install fluidsynth manually (no apt-get/brew found)"; exit 1
+  echo "!! install fluidsynth manually (no conda/apt-get/brew found)"; exit 1
 fi
 fluidsynth --version | head -1
 
